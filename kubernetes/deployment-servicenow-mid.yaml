@@ -1,0 +1,148 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: servicenow-mid-server
+  namespace: claude-mid-service
+  labels:
+    app: servicenow-mid
+    component: mid-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: servicenow-mid
+      component: mid-server
+  template:
+    metadata:
+      labels:
+        app: servicenow-mid
+        component: mid-server
+    spec:
+      containers:
+      - name: mid-server
+        # Official ServiceNow MID Server image
+        # Reference: https://docs.servicenow.com/bundle/tokyo-servicenow-platform/page/product/mid-server/concept/mid-server-docker.html
+        image: servicenow/mid-server:zurich  # Change to your version
+        imagePullPolicy: IfNotPresent
+
+        env:
+        # ServiceNow MID Server Configuration
+        - name: MID_INSTANCE_URL
+          valueFrom:
+            secretKeyRef:
+              name: servicenow-mid-secrets
+              key: MID_INSTANCE_URL
+        - name: MID_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: servicenow-mid-secrets
+              key: MID_USERNAME
+        - name: MID_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: servicenow-mid-secrets
+              key: MID_PASSWORD
+        - name: MID_SERVER_NAME
+          valueFrom:
+            secretKeyRef:
+              name: servicenow-mid-secrets
+              key: MID_SERVER_NAME
+
+        # Additional MID Server environment variables
+        # Refer to ServiceNow documentation for all available options
+        - name: MID_PROXY_HOST
+          value: ""  # Set if behind proxy
+        - name: MID_PROXY_PORT
+          value: ""  # Set if behind proxy
+        - name: MID_PROXY_USERNAME
+          value: ""  # Set if proxy requires auth
+        - name: MID_PROXY_PASSWORD
+          value: ""  # Set if proxy requires auth
+
+        volumeMounts:
+        - name: mid-server-data
+          mountPath: /opt/servicenow/mid/agent/work
+        - name: mid-server-logs
+          mountPath: /opt/servicenow/mid/agent/logs
+
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "ps aux | grep -v grep | grep -q mid.sh"
+          initialDelaySeconds: 60
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 3
+
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "test -f /opt/servicenow/mid/agent/work/status.txt"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        securityContext:
+          runAsNonRoot: false  # MID Server may require root
+          # runAsUser: 1000    # Uncomment if MID Server supports non-root
+          allowPrivilegeEscalation: true
+
+      volumes:
+      - name: mid-server-data
+        persistentVolumeClaim:
+          claimName: mid-server-data-pvc
+      - name: mid-server-logs
+        emptyDir: {}
+
+      restartPolicy: Always
+
+      # Optional: Use init container to validate configuration
+      initContainers:
+      - name: validate-config
+        image: busybox:latest
+        command: ['sh', '-c']
+        args:
+        - |
+          echo "Validating ServiceNow MID Server configuration..."
+          if [ -z "$MID_INSTANCE_URL" ]; then
+            echo "ERROR: MID_INSTANCE_URL not set"
+            exit 1
+          fi
+          if [ -z "$MID_USERNAME" ]; then
+            echo "ERROR: MID_USERNAME not set"
+            exit 1
+          fi
+          if [ -z "$MID_PASSWORD" ]; then
+            echo "ERROR: MID_PASSWORD not set"
+            exit 1
+          fi
+          echo "Configuration validation passed"
+        env:
+        - name: MID_INSTANCE_URL
+          valueFrom:
+            secretKeyRef:
+              name: servicenow-mid-secrets
+              key: MID_INSTANCE_URL
+        - name: MID_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: servicenow-mid-secrets
+              key: MID_USERNAME
+        - name: MID_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: servicenow-mid-secrets
+              key: MID_PASSWORD

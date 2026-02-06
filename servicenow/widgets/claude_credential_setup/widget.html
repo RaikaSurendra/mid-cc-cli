@@ -1,0 +1,122 @@
+<!-- Claude Credential Setup Widget -->
+<div class="credential-setup-container">
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <h3 class="panel-title">
+        <i class="fa fa-key"></i> Claude Code API Configuration
+      </h3>
+    </div>
+
+    <div class="panel-body">
+      <div ng-if="c.data.saved" class="alert alert-success">
+        <i class="fa fa-check-circle"></i> Credentials saved successfully!
+      </div>
+
+      <div ng-if="c.data.error" class="alert alert-danger">
+        <i class="fa fa-exclamation-triangle"></i> {{c.data.error}}
+      </div>
+
+      <div class="form-group">
+        <label for="anthropic-api-key">Anthropic API Key *</label>
+        <input
+          type="password"
+          id="anthropic-api-key"
+          class="form-control"
+          ng-model="c.data.anthropicApiKey"
+          placeholder="sk-ant-xxxxxxxxxxxxx"
+          required>
+        <small class="help-block">
+          Get your API key from <a href="https://console.anthropic.com/" target="_blank">Anthropic Console</a>
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label for="github-token">GitHub Token (Optional)</label>
+        <input
+          type="password"
+          id="github-token"
+          class="form-control"
+          ng-model="c.data.githubToken"
+          placeholder="ghp_xxxxxxxxxxxxx">
+        <small class="help-block">
+          Optional: For enhanced GitHub integration
+        </small>
+      </div>
+
+      <div class="form-actions">
+        <button
+          class="btn btn-primary"
+          ng-click="c.saveCredentials()"
+          ng-disabled="c.data.saving || !c.data.anthropicApiKey">
+          <i class="fa" ng-class="{'fa-spinner fa-spin': c.data.saving, 'fa-save': !c.data.saving}"></i>
+          {{c.data.saving ? 'Saving...' : 'Save Credentials'}}
+        </button>
+
+        <button
+          class="btn btn-default"
+          ng-click="c.testCredentials()"
+          ng-disabled="c.data.testing || !c.data.anthropicApiKey">
+          <i class="fa" ng-class="{'fa-spinner fa-spin': c.data.testing, 'fa-flask': !c.data.testing}"></i>
+          {{c.data.testing ? 'Testing...' : 'Test Connection'}}
+        </button>
+
+        <button
+          class="btn btn-danger pull-right"
+          ng-click="c.deleteCredentials()"
+          ng-if="c.data.hasExisting"
+          ng-disabled="c.data.deleting">
+          <i class="fa" ng-class="{'fa-spinner fa-spin': c.data.deleting, 'fa-trash': !c.data.deleting}"></i>
+          {{c.data.deleting ? 'Deleting...' : 'Delete Credentials'}}
+        </button>
+      </div>
+
+      <hr>
+
+      <div class="credential-info" ng-if="c.data.hasExisting">
+        <h4>Current Status</h4>
+        <dl class="dl-horizontal">
+          <dt>Last Used:</dt>
+          <dd>{{c.data.lastUsed || 'Never'}}</dd>
+
+          <dt>Validation Status:</dt>
+          <dd>
+            <span class="label" ng-class="{
+              'label-success': c.data.validationStatus === 'valid',
+              'label-danger': c.data.validationStatus === 'invalid',
+              'label-warning': c.data.validationStatus === 'untested'
+            }">
+              {{c.data.validationStatus}}
+            </span>
+          </dd>
+        </dl>
+      </div>
+
+      <div class="security-notice">
+        <h4><i class="fa fa-shield"></i> Security Notice</h4>
+        <ul>
+          <li>Your API key is encrypted and stored securely in ServiceNow</li>
+          <li>Keys are never transmitted to client browsers</li>
+          <li>Only you can access your credentials</li>
+          <li>Keys are used only for your Claude Code sessions on the MID Server</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel panel-info">
+    <div class="panel-heading">
+      <h4 class="panel-title">
+        <i class="fa fa-question-circle"></i> How to Get Started
+      </h4>
+    </div>
+    <div class="panel-body">
+      <ol>
+        <li><strong>Get an API Key:</strong> Sign up at <a href="https://console.anthropic.com/" target="_blank">Anthropic Console</a></li>
+        <li><strong>Enter Your Key:</strong> Paste your API key in the field above</li>
+        <li><strong>Test Connection:</strong> Click "Test Connection" to verify your key works</li>
+        <li><strong>Save:</strong> Click "Save Credentials" to store your key securely</li>
+        <li><strong>Start Coding:</strong> Navigate to <a href="?id=claude_terminal">Claude Terminal</a> to start</li>
+      </ol>
+    </div>
+  </div>
+</div>

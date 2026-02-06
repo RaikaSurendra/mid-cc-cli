@@ -1,0 +1,241 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude-terminal-service
+  namespace: claude-mid-service
+  labels:
+    app: claude-terminal
+    component: http-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: claude-terminal
+      component: http-service
+  template:
+    metadata:
+      labels:
+        app: claude-terminal
+        component: http-service
+    spec:
+      containers:
+      - name: claude-terminal-service
+        image: claude-terminal-service:1.0.0  # Build and push your image
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 3000
+          protocol: TCP
+
+        env:
+        # Load from ConfigMap
+        - name: SERVICENOW_INSTANCE
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: SERVICENOW_INSTANCE
+        - name: MID_SERVER_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: MID_SERVER_NAME
+        - name: NODE_SERVICE_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: NODE_SERVICE_PORT
+        - name: NODE_SERVICE_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: NODE_SERVICE_HOST
+        - name: SESSION_TIMEOUT_MINUTES
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: SESSION_TIMEOUT_MINUTES
+        - name: MAX_SESSIONS_PER_USER
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: MAX_SESSIONS_PER_USER
+        - name: OUTPUT_BUFFER_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: OUTPUT_BUFFER_SIZE
+        - name: WORKSPACE_BASE_PATH
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: WORKSPACE_BASE_PATH
+        - name: WORKSPACE_TYPE
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: WORKSPACE_TYPE
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: LOG_LEVEL
+        - name: LOG_FILE
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: LOG_FILE
+        - name: GIN_MODE
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: GIN_MODE
+
+        # Load from Secret
+        - name: SERVICENOW_API_USER
+          valueFrom:
+            secretKeyRef:
+              name: claude-terminal-secrets
+              key: SERVICENOW_API_USER
+        - name: SERVICENOW_API_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: claude-terminal-secrets
+              key: SERVICENOW_API_PASSWORD
+        - name: ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: claude-terminal-secrets
+              key: ENCRYPTION_KEY
+
+        volumeMounts:
+        - name: claude-sessions
+          mountPath: /tmp/claude-sessions
+        - name: logs
+          mountPath: /var/log
+
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+
+      volumes:
+      - name: claude-sessions
+        persistentVolumeClaim:
+          claimName: claude-sessions-pvc
+      - name: logs
+        emptyDir: {}
+
+      restartPolicy: Always
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude-ecc-poller
+  namespace: claude-mid-service
+  labels:
+    app: claude-terminal
+    component: ecc-poller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: claude-terminal
+      component: ecc-poller
+  template:
+    metadata:
+      labels:
+        app: claude-terminal
+        component: ecc-poller
+    spec:
+      containers:
+      - name: ecc-poller
+        image: claude-terminal-service:1.0.0  # Same image, different command
+        imagePullPolicy: IfNotPresent
+        command: ["/app/ecc-poller"]
+
+        env:
+        # Load from ConfigMap
+        - name: SERVICENOW_INSTANCE
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: SERVICENOW_INSTANCE
+        - name: MID_SERVER_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: MID_SERVER_NAME
+        - name: NODE_SERVICE_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: NODE_SERVICE_PORT
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: claude-terminal-config
+              key: LOG_LEVEL
+
+        # Load from Secret
+        - name: SERVICENOW_API_USER
+          valueFrom:
+            secretKeyRef:
+              name: claude-terminal-secrets
+              key: SERVICENOW_API_USER
+        - name: SERVICENOW_API_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: claude-terminal-secrets
+              key: SERVICENOW_API_PASSWORD
+
+        # Point to claude-terminal-service within cluster
+        - name: NODE_SERVICE_HOST
+          value: "claude-terminal-service"
+
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+
+      restartPolicy: Always

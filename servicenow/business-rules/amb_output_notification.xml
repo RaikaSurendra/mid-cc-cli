@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<unload unload_date="2024-01-24 00:00:00">
+  <sys_script>
+    <name>AMB Output Notification</name>
+    <active>true</active>
+    <action_delete>false</action_delete>
+    <action_insert>false</action_insert>
+    <action_query>false</action_query>
+    <action_update>true</action_update>
+    <advanced>true</advanced>
+    <collection>x_claude_terminal_session</collection>
+    <condition>output_buffer.changes()</condition>
+    <description>Publish AMB notification when terminal output buffer is updated</description>
+    <execute_function>false</execute_function>
+    <filter_condition/>
+    <is_rest>false</is_rest>
+    <message/>
+    <name>AMB Output Notification</name>
+    <order>100</order>
+    <priority>100</priority>
+    <rest_method/>
+    <rest_method_text/>
+    <rest_service/>
+    <rest_service_text/>
+    <rest_variables/>
+    <role_conditions/>
+    <script><![CDATA[
+(function executeRule(current, previous /*null when async*/) {
+
+    try {
+        // Only notify if there's actual output
+        if (!current.output_buffer || current.output_buffer.toString() === '[]') {
+            return;
+        }
+
+        // Get session ID
+        var sessionId = current.session_id.toString();
+
+        // Publish AMB message
+        var channel = 'claude.terminal.' + sessionId;
+
+        var message = {
+            sessionId: sessionId,
+            status: current.status.toString(),
+            timestamp: new GlideDateTime().toString(),
+            hasOutput: true
+        };
+
+        // Use AMB to publish the notification
+        sn_amb.AmbulatoryMessageBus.publish(channel, JSON.stringify(message));
+
+        gs.debug('AMB notification published to channel: ' + channel);
+
+    } catch (e) {
+        gs.error('AMB Output Notification error: ' + e.message);
+    }
+
+})(current, previous);
+]]></script>
+    <sys_class_name>sys_script</sys_class_name>
+    <sys_created_by>admin</sys_created_by>
+    <sys_domain>global</sys_domain>
+    <sys_name>AMB Output Notification</sys_name>
+    <sys_overrides/>
+    <sys_package display_value="Global" source="global">global</sys_package>
+    <sys_policy/>
+    <sys_scope display_value="Global">global</sys_scope>
+    <template/>
+    <when>after</when>
+  </sys_script>
+</unload>

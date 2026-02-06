@@ -1,0 +1,132 @@
+.claude-terminal-container {
+  background: #1e1e1e;
+  border-radius: 8px;
+  padding: 0;
+  margin: 20px 0;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+
+  .terminal-header {
+    background: #2d2d30;
+    padding: 12px 20px;
+    border-radius: 8px 8px 0 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #3e3e42;
+
+    h3 {
+      margin: 0;
+      color: #d4d4d4;
+      font-size: 16px;
+      font-weight: 500;
+    }
+
+    .terminal-controls {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+
+      .status-indicator {
+        padding: 4px 12px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: 500;
+        text-transform: uppercase;
+
+        &.status-initializing {
+          background: #3a3a3d;
+          color: #ffa500;
+        }
+
+        &.status-active {
+          background: #1e3a1e;
+          color: #4ec9b0;
+        }
+
+        &.status-idle {
+          background: #3a3a3d;
+          color: #858585;
+        }
+
+        &.status-terminated {
+          background: #3a1e1e;
+          color: #f48771;
+        }
+
+        &.status-error {
+          background: #5a1e1e;
+          color: #f48771;
+        }
+      }
+    }
+  }
+
+  .terminal-wrapper {
+    padding: 0;
+    background: #1e1e1e;
+    border-radius: 0 0 8px 8px;
+
+    .terminal-display {
+      padding: 10px;
+      height: 600px;
+      overflow: hidden;
+
+      .xterm {
+        height: 100%;
+      }
+
+      .xterm-viewport {
+        background: #1e1e1e !important;
+      }
+    }
+  }
+
+  .terminal-loading {
+    padding: 60px 20px;
+    text-align: center;
+    color: #858585;
+    font-size: 16px;
+
+    .fa-spinner {
+      margin-right: 10px;
+    }
+  }
+
+  .terminal-error {
+    padding: 20px;
+
+    .alert {
+      margin: 0;
+    }
+  }
+
+  .terminal-no-credentials {
+    padding: 20px;
+
+    .alert {
+      margin: 0;
+    }
+  }
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  .claude-terminal-container {
+    margin: 10px 0;
+
+    .terminal-header {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 10px;
+
+      .terminal-controls {
+        width: 100%;
+        justify-content: space-between;
+      }
+    }
+
+    .terminal-wrapper .terminal-display {
+      height: 400px;
+    }
+  }
+}

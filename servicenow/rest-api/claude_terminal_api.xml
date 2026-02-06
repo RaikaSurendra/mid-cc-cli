@@ -1,0 +1,326 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<unload unload_date="2024-01-24 00:00:00">
+  <sys_rest_message>
+    <authentication type="inherit">parent</authentication>
+    <description>Claude Terminal API for MID Server Integration</description>
+    <name>Claude Terminal API</name>
+    <rest_endpoint>http://localhost:3000</rest_endpoint>
+  </sys_rest_message>
+
+  <sys_script_include>
+    <name>ClaudeTerminalAPI</name>
+    <script><![CDATA[
+var ClaudeTerminalAPI = Class.create();
+ClaudeTerminalAPI.prototype = {
+    initialize: function() {
+        this.TABLE_SESSION = 'x_claude_terminal_session';
+        this.TABLE_CREDENTIALS = 'x_claude_credentials';
+        this.ECC_TOPIC_COMMAND = 'ClaudeTerminalCommand';
+        this.ECC_TOPIC_RESPONSE = 'ClaudeTerminalResponse';
+    },
+
+    /**
+     * Create a new terminal session
+     * @param {string} userId - User sys_id
+     * @param {string} workspaceType - 'isolated' or 'persistent'
+     * @returns {object} Session details
+     */
+    createSession: function(userId, workspaceType) {
+        try {
+            // Get user credentials
+            var credentials = this._getUserCredentials(userId);
+            if (!credentials) {
+                return {
+                    success: false,
+                    error: 'User credentials not found. Please configure your API key first.'
+                };
+            }
+
+            // Create session record
+            var sessionGR = new GlideRecord(this.TABLE_SESSION);
+            sessionGR.initialize();
+            sessionGR.session_id = this._generateUUID();
+            sessionGR.user = userId;
+            sessionGR.status = 'initializing';
+            sessionGR.workspace_type = workspaceType || 'isolated';
+            sessionGR.last_activity = new GlideDateTime();
+            sessionGR.insert();
+
+            var sessionId = sessionGR.session_id.toString();
+
+            // Send command to MID Server via ECC Queue
+            var payload = {
+                action: 'create_session',
+                sessionId: sessionId,
+                userId: userId,
+                credentials: {
+                    anthropicApiKey: credentials.anthropic_api_key,
+                    githubToken: credentials.github_token
+                },
+                workspaceType: workspaceType
+            };
+
+            this._sendToECCQueue(payload, sessionId);
+
+            return {
+                success: true,
+                sessionId: sessionId,
+                status: 'initializing'
+            };
+
+        } catch (e) {
+            gs.error('ClaudeTerminalAPI.createSession error: ' + e.message);
+            return {
+                success: false,
+                error: e.message
+            };
+        }
+    },
+
+    /**
+     * Send command to session
+     * @param {string} sessionId - Session ID
+     * @param {string} command - Command to send
+     * @returns {object} Result
+     */
+    sendCommand: function(sessionId, command) {
+        try {
+            var sessionGR = this._getSession(sessionId);
+            if (!sessionGR) {
+                return {
+                    success: false,
+                    error: 'Session not found'
+                };
+            }
+
+            if (sessionGR.status != 'active') {
+                return {
+                    success: false,
+                    error: 'Session is not active'
+                };
+            }
+
+            // Send to ECC Queue
+            var payload = {
+                action: 'send_command',
+                sessionId: sessionId,
+                command: command
+            };
+
+            this._sendToECCQueue(payload, sessionId);
+
+            // Update last activity
+            sessionGR.last_activity = new GlideDateTime();
+            sessionGR.update();
+
+            return {
+                success: true
+            };
+
+        } catch (e) {
+            gs.error('ClaudeTerminalAPI.sendCommand error: ' + e.message);
+            return {
+                success: false,
+                error: e.message
+            };
+        }
+    },
+
+    /**
+     * Get session output
+     * @param {string} sessionId - Session ID
+     * @param {boolean} clear - Whether to clear buffer after reading
+     * @returns {object} Output data
+     */
+    getOutput: function(sessionId, clear) {
+        try {
+            var sessionGR = this._getSession(sessionId);
+            if (!sessionGR) {
+                return {
+                    success: false,
+                    error: 'Session not found'
+                };
+            }
+
+            var output = [];
+            if (sessionGR.output_buffer) {
+                try {
+                    output = JSON.parse(sessionGR.output_buffer.toString());
+                } catch (e) {
+                    gs.warn('Failed to parse output buffer: ' + e.message);
+                }
+            }
+
+            // Clear buffer if requested
+            if (clear) {
+                sessionGR.output_buffer = '[]';
+                sessionGR.update();
+            }
+
+            return {
+                success: true,
+                sessionId: sessionId,
+                output: output,
+                status: sessionGR.status.toString()
+            };
+
+        } catch (e) {
+            gs.error('ClaudeTerminalAPI.getOutput error: ' + e.message);
+            return {
+                success: false,
+                error: e.message
+            };
+        }
+    },
+
+    /**
+     * Get session status
+     * @param {string} sessionId - Session ID
+     * @returns {object} Status
+     */
+    getStatus: function(sessionId) {
+        try {
+            var sessionGR = this._getSession(sessionId);
+            if (!sessionGR) {
+                return {
+                    success: false,
+                    error: 'Session not found'
+                };
+            }
+
+            return {
+                success: true,
+                sessionId: sessionId,
+                status: sessionGR.status.toString(),
+                userId: sessionGR.user.toString(),
+                workspacePath: sessionGR.workspace_path.toString(),
+                lastActivity: sessionGR.last_activity.toString(),
+                created: sessionGR.sys_created_on.toString()
+            };
+
+        } catch (e) {
+            gs.error('ClaudeTerminalAPI.getStatus error: ' + e.message);
+            return {
+                success: false,
+                error: e.message
+            };
+        }
+    },
+
+    /**
+     * Terminate session
+     * @param {string} sessionId - Session ID
+     * @returns {object} Result
+     */
+    terminateSession: function(sessionId) {
+        try {
+            var sessionGR = this._getSession(sessionId);
+            if (!sessionGR) {
+                return {
+                    success: false,
+                    error: 'Session not found'
+                };
+            }
+
+            // Send terminate command to MID Server
+            var payload = {
+                action: 'terminate_session',
+                sessionId: sessionId
+            };
+
+            this._sendToECCQueue(payload, sessionId);
+
+            // Update session status
+            sessionGR.status = 'terminated';
+            sessionGR.update();
+
+            return {
+                success: true,
+                message: 'Session terminated successfully'
+            };
+
+        } catch (e) {
+            gs.error('ClaudeTerminalAPI.terminateSession error: ' + e.message);
+            return {
+                success: false,
+                error: e.message
+            };
+        }
+    },
+
+    /**
+     * Resize terminal
+     * @param {string} sessionId - Session ID
+     * @param {number} cols - Column count
+     * @param {number} rows - Row count
+     * @returns {object} Result
+     */
+    resizeTerminal: function(sessionId, cols, rows) {
+        try {
+            var payload = {
+                action: 'resize_terminal',
+                sessionId: sessionId,
+                cols: parseInt(cols),
+                rows: parseInt(rows)
+            };
+
+            this._sendToECCQueue(payload, sessionId);
+
+            return {
+                success: true
+            };
+
+        } catch (e) {
+            gs.error('ClaudeTerminalAPI.resizeTerminal error: ' + e.message);
+            return {
+                success: false,
+                error: e.message
+            };
+        }
+    },
+
+    // Private methods
+
+    _getSession: function(sessionId) {
+        var gr = new GlideRecord(this.TABLE_SESSION);
+        gr.addQuery('session_id', sessionId);
+        gr.query();
+        if (gr.next()) {
+            return gr;
+        }
+        return null;
+    },
+
+    _getUserCredentials: function(userId) {
+        var gr = new GlideRecord(this.TABLE_CREDENTIALS);
+        gr.addQuery('user', userId);
+        gr.query();
+        if (gr.next()) {
+            return {
+                anthropic_api_key: gr.anthropic_api_key.getDecryptedValue(),
+                github_token: gr.github_token.getDecryptedValue()
+            };
+        }
+        return null;
+    },
+
+    _sendToECCQueue: function(payload, sessionId) {
+        var ecc = new GlideRecord('ecc_queue');
+        ecc.initialize();
+        ecc.topic = this.ECC_TOPIC_COMMAND;
+        ecc.name = 'Claude Terminal Command: ' + sessionId;
+        ecc.queue = 'input';
+        ecc.state = 'ready';
+        ecc.payload = JSON.stringify(payload);
+        ecc.insert();
+    },
+
+    _generateUUID: function() {
+        return gs.generateGUID();
+    },
+
+    type: 'ClaudeTerminalAPI'
+};
+]]></script>
+  </sys_script_include>
+</unload>

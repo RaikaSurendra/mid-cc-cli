@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: claude-mid-service
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - pvc.yaml
+  - deployment-claude-terminal.yaml
+  - deployment-servicenow-mid.yaml
+  - service.yaml
+
+# Common labels for all resources
+commonLabels:
+  project: claude-terminal-mid
+  managed-by: kustomize
+  version: "1.0.0"
+
+# Image configurations
+images:
+  - name: claude-terminal-service
+    newName: your-registry/claude-terminal-service
+    newTag: "1.0.0"
+  - name: servicenow/mid-server
+    newName: servicenow/mid-server
+    newTag: tokyo  # Change to your ServiceNow version
+
+# ConfigMap generator (alternative to configmap.yaml)
+# Uncomment if you want to generate ConfigMap from files
+# configMapGenerator:
+#   - name: claude-terminal-config
+#     files:
+#       - .env
+
+# Secret generator (alternative to secret.yaml)
+# Uncomment and use for production with sealed-secrets or external-secrets
+# secretGenerator:
+#   - name: claude-terminal-secrets
+#     envs:
+#       - .env.secret

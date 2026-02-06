@@ -1,0 +1,119 @@
+{
+  "name": "x_claude_terminal_session",
+  "label": "Claude Terminal Session",
+  "scope": "x_claude_terminal",
+  "extends": "",
+  "is_extendable": false,
+  "create_access_controls": true,
+  "update_access_controls": true,
+  "columns": [
+    {
+      "column_name": "session_id",
+      "column_label": "Session ID",
+      "type": "string",
+      "max_length": 40,
+      "mandatory": true,
+      "unique": true,
+      "display": true
+    },
+    {
+      "column_name": "user",
+      "column_label": "User",
+      "type": "reference",
+      "reference": "sys_user",
+      "mandatory": true
+    },
+    {
+      "column_name": "status",
+      "column_label": "Status",
+      "type": "choice",
+      "choices": [
+        {
+          "value": "initializing",
+          "label": "Initializing"
+        },
+        {
+          "value": "active",
+          "label": "Active"
+        },
+        {
+          "value": "idle",
+          "label": "Idle"
+        },
+        {
+          "value": "terminated",
+          "label": "Terminated"
+        },
+        {
+          "value": "error",
+          "label": "Error"
+        }
+      ],
+      "default_value": "initializing",
+      "mandatory": true
+    },
+    {
+      "column_name": "command_queue",
+      "column_label": "Command Queue",
+      "type": "json",
+      "max_length": 4000
+    },
+    {
+      "column_name": "output_buffer",
+      "column_label": "Output Buffer",
+      "type": "json",
+      "max_length": 65000
+    },
+    {
+      "column_name": "workspace_path",
+      "column_label": "Workspace Path",
+      "type": "string",
+      "max_length": 255
+    },
+    {
+      "column_name": "workspace_type",
+      "column_label": "Workspace Type",
+      "type": "choice",
+      "choices": [
+        {
+          "value": "isolated",
+          "label": "Isolated (Temporary)"
+        },
+        {
+          "value": "persistent",
+          "label": "Persistent"
+        }
+      ],
+      "default_value": "isolated"
+    },
+    {
+      "column_name": "last_activity",
+      "column_label": "Last Activity",
+      "type": "glide_date_time",
+      "mandatory": true
+    },
+    {
+      "column_name": "mid_server",
+      "column_label": "MID Server",
+      "type": "string",
+      "max_length": 100
+    },
+    {
+      "column_name": "error_message",
+      "column_label": "Error Message",
+      "type": "string",
+      "max_length": 1000
+    }
+  ],
+  "indexes": [
+    {
+      "name": "idx_user_status",
+      "columns": ["user", "status"]
+    },
+    {
+      "name": "idx_session_id",
+      "columns": ["session_id"],
+      "unique": true
+    }
+  ]
+}

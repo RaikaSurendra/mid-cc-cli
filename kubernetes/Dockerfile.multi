@@ -1,0 +1,61 @@
+# Multi-binary Dockerfile for Kubernetes deployment
+# This builds both the HTTP service and ECC poller in one image
+
+# Stage 1: Build
+FROM golang:1.21-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git make ca-certificates
+
+WORKDIR /build
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build both binaries
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /build/claude-terminal-service ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /build/ecc-poller ./cmd/ecc-poller
+
+# Stage 2: Runtime
+FROM alpine:latest
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    ca-certificates \
+    bash \
+    curl \
+    && addgroup -S appgroup \
+    && adduser -S appuser -G appgroup
+
+# Install Claude CLI
+# Note: Adjust this based on actual Claude CLI installation method
+RUN curl -fsSL https://anthropic.com/install-claude-cli.sh | sh || \
+    echo "Claude CLI installation skipped - install manually if needed"
+
+# Create necessary directories
+RUN mkdir -p /app /tmp/claude-sessions /var/log && \
+    chown -R appuser:appgroup /app /tmp/claude-sessions /var/log
+
+WORKDIR /app
+
+# Copy binaries from builder
+COPY --from=builder --chown=appuser:appgroup /build/claude-terminal-service /app/
+COPY --from=builder --chown=appuser:appgroup /build/ecc-poller /app/
+
+# Switch to non-root user
+USER appuser
+
+# Expose port
+EXPOSE 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
+# Default: Run HTTP service
+# ECC poller deployment will override with: ["/app/ecc-poller"]
+CMD ["/app/claude-terminal-service"]

@@ -1,0 +1,117 @@
+services:
+  # PostgreSQL for session persistence
+  postgres:
+    image: postgres:15-alpine
+    container_name: claude-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: claude_user
+      POSTGRES_PASSWORD: claude_password
+      POSTGRES_DB: claude_terminal
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U claude_user -d claude_terminal"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 5
+    networks:
+      - mid-network
+
+  # Claude Terminal HTTP Service
+  claude-terminal-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: claude-terminal-service
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_SERVICE_HOST: "0.0.0.0"
+      LOG_FILE: "/var/log/claude-terminal-service.log"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      DB_USER: "claude_user"
+      DB_PASSWORD: "claude_password"
+      DB_NAME: "claude_terminal"
+      DB_SSLMODE: "disable"
+    ports:
+      - "3000:3000"
+    volumes:
+      - claude-sessions:/tmp/claude-sessions
+      - claude-logs:/var/log
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 5s
+      retries: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - mid-network
+
+  # ECC Queue Poller
+  ecc-poller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ecc-poller
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_SERVICE_HOST: "claude-terminal-service"
+      LOG_FILE: "/var/log/ecc-poller.log"
+    command: ["./ecc-poller"]
+    volumes:
+      - claude-logs:/var/log
+    depends_on:
+      claude-terminal-service:
+        condition: service_healthy
+    networks:
+      - mid-network
+
+  # ServiceNow MID Server
+  servicenow-mid-server:
+    image: servicenow-mid-server:zurich-patch4-hotfix3
+    container_name: servicenow-mid-server
+    restart: unless-stopped
+    environment:
+      MID_INSTANCE_URL: "https://empsuren.service-now.com"
+      MID_INSTANCE_USERNAME: "mid.user"
+      MID_INSTANCE_PASSWORD: "_7PJmFo!ifiuc6X9cVV-"
+      MID_SERVER_NAME: "k8s-mid-server-01"
+    volumes:
+      - mid-server-work:/opt/snc_mid_server/agent/work
+      - mid-server-logs:/opt/snc_mid_server/agent/logs
+    healthcheck:
+      test: ["CMD", "bash", "-c", "pgrep -f 'mid' > /dev/null || exit 1"]
+      interval: 5m
+      timeout: 15s
+      retries: 3
+      start_period: 3m
+    networks:
+      - mid-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+
+volumes:
+  postgres-data:
+  claude-sessions:
+  claude-logs:
+  mid-server-work:
+  mid-server-logs:
+
+networks:
+  mid-network:
+    driver: bridge

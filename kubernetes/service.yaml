@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: claude-terminal-service
+  namespace: claude-mid-service
+  labels:
+    app: claude-terminal
+    component: http-service
+spec:
+  type: ClusterIP
+  selector:
+    app: claude-terminal
+    component: http-service
+  ports:
+  - name: http
+    port: 3000
+    targetPort: 3000
+    protocol: TCP
+  sessionAffinity: None
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: servicenow-mid-server
+  namespace: claude-mid-service
+  labels:
+    app: servicenow-mid
+    component: mid-server
+spec:
+  type: ClusterIP
+  selector:
+    app: servicenow-mid
+    component: mid-server
+  ports:
+  - name: mid-port
+    port: 80
+    targetPort: 80
+    protocol: TCP
+  sessionAffinity: None

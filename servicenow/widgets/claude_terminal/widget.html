@@ -1,0 +1,44 @@
+<!-- Claude Terminal Widget -->
+<div class="claude-terminal-container">
+  <div class="terminal-header">
+    <h3>Claude Code Terminal</h3>
+    <div class="terminal-controls">
+      <span class="status-indicator" ng-class="c.data.statusClass">
+        {{c.data.status}}
+      </span>
+      <button class="btn btn-sm btn-danger" ng-click="c.terminateSession()">
+        <i class="fa fa-power-off"></i> Terminate
+      </button>
+    </div>
+  </div>
+
+  <div class="terminal-wrapper" ng-if="c.data.sessionId">
+    <div id="terminal-{{c.data.sessionId}}" class="terminal-display"></div>
+  </div>
+
+  <div class="terminal-loading" ng-if="!c.data.sessionId && !c.data.error">
+    <i class="fa fa-spinner fa-spin"></i> Initializing Claude Code terminal...
+  </div>
+
+  <div class="terminal-error" ng-if="c.data.error">
+    <div class="alert alert-danger">
+      <i class="fa fa-exclamation-triangle"></i>
+      <strong>Error:</strong> {{c.data.error}}
+      <br>
+      <button class="btn btn-sm btn-primary" ng-click="c.retry()">
+        <i class="fa fa-refresh"></i> Retry
+      </button>
+    </div>
+  </div>
+
+  <div class="terminal-no-credentials" ng-if="c.data.needsCredentials">
+    <div class="alert alert-info">
+      <i class="fa fa-key"></i>
+      <strong>API Key Required:</strong> Please configure your Anthropic API key first.
+      <br>
+      <a href="?id=claude_credential_setup" class="btn btn-sm btn-primary">
+        <i class="fa fa-cog"></i> Setup Credentials
+      </a>
+    </div>
+  </div>
+</div>
