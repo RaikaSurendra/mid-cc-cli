@@ -1,239 +1,222 @@
-/**
- * ClaudeTerminalAPI - Server-side Script Include
- *
- * Runs ON the ServiceNow instance. Triggers MID Server probes
- * to communicate with the Claude Terminal HTTP Service.
- *
- * This replaces the direct ECC Queue manipulation used in the
- * original setup. Instead, it uses the standard JavascriptProbe
- * framework to route commands through the MID Server.
- *
- * ServiceNow Setup:
- *   1. Create Script Include:
- *      - Name: ClaudeTerminalAPI
- *      - Client callable: false
- *      - Active: true
- *      - Script: (paste this file)
- *
- *   2. System Properties (sys_properties):
- *      - x_claude.terminal.mid_server  = k8s-mid-proxy-01
- *      - x_claude.terminal.service_url = http://claude-terminal-service:3000
- *      - x_claude.terminal.auth_token  = mid-llm-cli-dev-token-2026
- *
- * Usage from Server Scripts / Business Rules:
- *   var api = new ClaudeTerminalAPI();
- *   var result = api.createSession('john.doe', 'sk-ant-...', '', 'isolated');
- *   var sessionId = result.sessionId;
- *   api.sendCommand(sessionId, 'john.doe', 'help\n');
- *   var output = api.getOutput(sessionId, 'john.doe', true);
- */
+// =============================================================================
+// ClaudeTerminalAPI — ServiceNow Script Include (Instance-side)
+// =============================================================================
+// Creates JavascriptProbe payloads and inserts them into the ECC Queue for
+// the MID Server to pick up.  The MID Server runs ClaudeTerminalProbe which
+// makes the actual HTTP call to the Claude Terminal Service.
+//
+// Usage (from Scripted REST, Business Rule, or Flow):
+//   var api = new ClaudeTerminalAPI();
+//   var result = api.createSessionSync(userId, credentials);
+//
+// System Properties required:
+//   x_claude.terminal.mid_server   — MID Server name (e.g. "mid-docker-host")
+//   x_claude.terminal.service_url  — Service base URL (e.g. "http://claude-terminal-service:3000")
+//   x_claude.terminal.auth_token   — Bearer token for the HTTP service
+// =============================================================================
 
 var ClaudeTerminalAPI = Class.create();
 ClaudeTerminalAPI.prototype = {
+    type: 'ClaudeTerminalAPI',
 
     initialize: function() {
-        this.midServerName = gs.getProperty('x_claude.terminal.mid_server', 'k8s-mid-proxy-01');
-        this.serviceURL = gs.getProperty('x_claude.terminal.service_url', 'http://claude-terminal-service:3000');
-        this.authToken = gs.getProperty('x_claude.terminal.auth_token', '');
+        this.midServer  = gs.getProperty('x_claude.terminal.mid_server', '');
+        this.serviceUrl = gs.getProperty('x_claude.terminal.service_url', 'http://claude-terminal-service:3000');
+        this.authToken  = gs.getProperty('x_claude.terminal.auth_token', '');
+        this.TIMEOUT_MS = 15000; // max wait for MID Server response
+        this.POLL_MS    = 500;   // polling interval
     },
 
-    /**
-     * Create a new Claude terminal session.
-     *
-     * @param {string} userId - ServiceNow user name
-     * @param {string} anthropicApiKey - Anthropic API key
-     * @param {string} githubToken - GitHub token (optional)
-     * @param {string} workspaceType - 'isolated' or 'persistent'
-     * @returns {object} - { sessionId, status, workspacePath } or error
-     */
-    createSession: function(userId, anthropicApiKey, githubToken, workspaceType) {
-        var payload = JSON.stringify({
-            userId: userId,
-            credentials: {
-                anthropicApiKey: anthropicApiKey,
-                githubToken: githubToken || ''
-            },
-            workspaceType: workspaceType || 'isolated'
-        });
+    // ── Async methods (fire-and-forget into ECC Queue) ──────────────────
 
-        return this._executeProbe('create_session', '', userId, payload);
+    /**
+     * Create a new Claude Code terminal session.
+     * @param {string} userId
+     * @param {object} credentials  { anthropicApiKey, githubToken }
+     * @param {string} [workspaceType]
+     * @returns {string} ECC Queue sys_id for tracking
+     */
+    createSession: function(userId, credentials, workspaceType) {
+        return this._createProbe('create_session', {
+            userId: userId,
+            credentials: credentials,
+            workspaceType: workspaceType || 'temp'
+        });
     },
 
     /**
      * Send a command to an existing session.
-     *
-     * @param {string} sessionId - Session UUID
-     * @param {string} userId - Session owner
-     * @param {string} command - Command to execute
-     * @returns {object} - { success: true } or error
+     * @param {string} sessionId
+     * @param {string} command
+     * @returns {string} ECC Queue sys_id
      */
-    sendCommand: function(sessionId, userId, command) {
-        var payload = JSON.stringify({ command: command });
-        return this._executeProbe('send_command', sessionId, userId, payload);
+    sendCommand: function(sessionId, command) {
+        return this._createProbe('send_command', {
+            sessionId: sessionId,
+            command: command
+        });
     },
 
     /**
-     * Get output from a session.
-     *
-     * @param {string} sessionId - Session UUID
-     * @param {string} userId - Session owner
-     * @param {boolean} clear - Whether to clear the buffer after reading
-     * @returns {object} - { sessionId, output: [...], status }
+     * Get terminal output from a session.
+     * @param {string} sessionId
+     * @param {boolean} [clear=false]
+     * @returns {string} ECC Queue sys_id
      */
-    getOutput: function(sessionId, userId, clear) {
-        var payload = JSON.stringify({ clear: clear === true });
-        return this._executeProbe('get_output', sessionId, userId, payload);
+    getOutput: function(sessionId, clear) {
+        return this._createProbe('get_output', {
+            sessionId: sessionId,
+            clear: !!clear
+        });
     },
 
     /**
-     * Get status of a session.
-     *
-     * @param {string} sessionId - Session UUID
-     * @param {string} userId - Session owner
-     * @returns {object} - { sessionId, userId, status, ... }
+     * Get session status.
+     * @param {string} sessionId
+     * @returns {string} ECC Queue sys_id
      */
-    getStatus: function(sessionId, userId) {
-        return this._executeProbe('get_status', sessionId, userId, '{}');
+    getStatus: function(sessionId) {
+        return this._createProbe('get_status', {
+            sessionId: sessionId
+        });
     },
 
     /**
      * Terminate a session.
-     *
-     * @param {string} sessionId - Session UUID
-     * @param {string} userId - Session owner
-     * @returns {object} - { message: "session terminated" }
+     * @param {string} sessionId
+     * @returns {string} ECC Queue sys_id
      */
-    terminateSession: function(sessionId, userId) {
-        return this._executeProbe('terminate_session', sessionId, userId, '{}');
+    terminateSession: function(sessionId) {
+        return this._createProbe('terminate_session', {
+            sessionId: sessionId
+        });
     },
 
     /**
-     * Resize terminal dimensions.
-     *
-     * @param {string} sessionId - Session UUID
-     * @param {string} userId - Session owner
-     * @param {number} cols - Number of columns
-     * @param {number} rows - Number of rows
-     * @returns {object} - { success: true }
+     * Resize the terminal.
+     * @param {string} sessionId
+     * @param {number} cols
+     * @param {number} rows
+     * @returns {string} ECC Queue sys_id
      */
-    resizeTerminal: function(sessionId, userId, cols, rows) {
-        var payload = JSON.stringify({ cols: cols, rows: rows });
-        return this._executeProbe('resize_terminal', sessionId, userId, payload);
+    resizeTerminal: function(sessionId, cols, rows) {
+        return this._createProbe('resize_terminal', {
+            sessionId: sessionId,
+            cols: cols,
+            rows: rows
+        });
     },
 
+    // ── Synchronous wrappers (block until MID Server responds) ──────────
+
+    createSessionSync: function(userId, credentials, workspaceType) {
+        var eccSysId = this.createSession(userId, credentials, workspaceType);
+        return this._waitForResponse(eccSysId);
+    },
+
+    sendCommandSync: function(sessionId, command) {
+        var eccSysId = this.sendCommand(sessionId, command);
+        return this._waitForResponse(eccSysId);
+    },
+
+    getOutputSync: function(sessionId, clear) {
+        var eccSysId = this.getOutput(sessionId, clear);
+        return this._waitForResponse(eccSysId);
+    },
+
+    getStatusSync: function(sessionId) {
+        var eccSysId = this.getStatus(sessionId);
+        return this._waitForResponse(eccSysId);
+    },
+
+    terminateSessionSync: function(sessionId) {
+        var eccSysId = this.terminateSession(sessionId);
+        return this._waitForResponse(eccSysId);
+    },
+
+    resizeTerminalSync: function(sessionId, cols, rows) {
+        var eccSysId = this.resizeTerminal(sessionId, cols, rows);
+        return this._waitForResponse(eccSysId);
+    },
+
+    // ── Internal helpers ────────────────────────────────────────────────
+
     /**
-     * Execute a JavascriptProbe on the MID Server.
-     * This writes to the ECC Queue and waits for the MID Server to pick it up,
-     * execute ClaudeTerminalProbe, and return the result.
-     *
-     * @param {string} action - The action to perform
-     * @param {string} sessionId - Session UUID (empty for create)
-     * @param {string} userId - ServiceNow user
-     * @param {string} payload - JSON payload string
-     * @returns {object} - Parsed response from the probe
+     * Create a JavascriptProbe ECC Queue entry for the MID Server.
+     * @param {string} action  — one of the 6 supported actions
+     * @param {object} params  — action-specific parameters
+     * @returns {string} sys_id of the created ECC Queue record
+     * @private
      */
-    _executeProbe: function(action, sessionId, userId, payload) {
-        var probe = new JavascriptProbe(this.midServerName);
+    _createProbe: function(action, params) {
+        if (!this.midServer) {
+            throw new Error('x_claude.terminal.mid_server property is not configured');
+        }
+
+        var probe = new JavascriptProbe(this.midServer);
         probe.setName('ClaudeTerminalProbe');
-
-        // Set probe parameters (these become available via probe.getParameter() on MID)
-        probe.addParameter('action', action);
-        probe.addParameter('session_id', sessionId);
-        probe.addParameter('user_id', userId);
-        probe.addParameter('payload', payload);
-        probe.addParameter('service_url', this.serviceURL);
-        probe.addParameter('auth_token', this.authToken);
-
-        // Set the probe script to use our registered MID Server Script Include
         probe.setJavascript(
             'var probe = new ClaudeTerminalProbe();' +
             'probe.execute();'
         );
 
-        // Create the probe (writes to ECC Queue)
+        // Pass parameters to the MID Server probe
+        probe.addParameter('action',      action);
+        probe.addParameter('params',      JSON.stringify(params));
+        probe.addParameter('service_url', this.serviceUrl);
+        probe.addParameter('auth_token',  this.authToken);
+
         var eccSysId = probe.create();
 
-        gs.debug('ClaudeTerminalAPI: Probe created for action=' + action +
-                 ' ecc_sys_id=' + eccSysId + ' mid=' + this.midServerName);
+        gs.debug('ClaudeTerminalAPI: Created probe for action={0}, ecc_sys_id={1}',
+            action, eccSysId);
 
-        // Return the ECC sys_id so callers can track async results
-        return {
-            ecc_sys_id: eccSysId,
-            action: action,
-            mid_server: this.midServerName,
-            status: 'queued'
-        };
+        return eccSysId;
     },
 
     /**
-     * Check the result of a previously submitted probe.
-     * Looks for the output ECC Queue item matching the input sys_id.
-     *
-     * @param {string} eccSysId - The sys_id returned by _executeProbe
-     * @param {number} maxWaitMs - Maximum time to wait (default: 10000ms)
-     * @returns {object|null} - Parsed probe result or null if not ready
+     * Poll the ECC Queue output for a response from the MID Server.
+     * Blocks until the response arrives or timeout is reached.
+     * @param {string} eccSysId  — sys_id of the original ECC Queue input record
+     * @returns {object} parsed JSON result from the MID Server
+     * @private
      */
-    getProbeResult: function(eccSysId, maxWaitMs) {
-        maxWaitMs = maxWaitMs || 10000;
-        var startTime = new Date().getTime();
+    _waitForResponse: function(eccSysId) {
+        var elapsed = 0;
 
-        while (new Date().getTime() - startTime < maxWaitMs) {
+        while (elapsed < this.TIMEOUT_MS) {
             var gr = new GlideRecord('ecc_queue');
-            gr.addQuery('response_to', eccSysId);
             gr.addQuery('queue', 'output');
+            gr.addQuery('response_to', eccSysId);
+            gr.addQuery('state', 'processed');
+            gr.setLimit(1);
             gr.query();
 
             if (gr.next()) {
-                var output = gr.getValue('payload');
+                var output = gr.getValue('output');
                 try {
-                    var parsed = JSON.parse(output);
-                    if (parsed.data) {
-                        return parsed.data;
-                    }
-                    return parsed;
+                    return JSON.parse(output);
                 } catch (e) {
-                    return { raw: output };
+                    return { success: false, error: 'Failed to parse MID response: ' + e.message, raw: output };
                 }
             }
 
-            // Wait 500ms before checking again
-            gs.sleep(500);
+            // Also check for errors
+            var errGr = new GlideRecord('ecc_queue');
+            errGr.addQuery('queue', 'output');
+            errGr.addQuery('response_to', eccSysId);
+            errGr.addQuery('state', 'error');
+            errGr.setLimit(1);
+            errGr.query();
+
+            if (errGr.next()) {
+                return { success: false, error: errGr.getValue('output') || 'MID Server probe failed' };
+            }
+
+            gs.sleep(this.POLL_MS);
+            elapsed += this.POLL_MS;
         }
 
-        return null; // Timed out
-    },
-
-    /**
-     * Synchronous helper that creates a session and waits for the result.
-     * Useful for scripted REST endpoints.
-     *
-     * @param {string} userId
-     * @param {string} anthropicApiKey
-     * @param {string} githubToken
-     * @param {string} workspaceType
-     * @param {number} timeoutMs - Max wait time (default: 15000)
-     * @returns {object} - Session info or error
-     */
-    createSessionSync: function(userId, anthropicApiKey, githubToken, workspaceType, timeoutMs) {
-        var probeRef = this.createSession(userId, anthropicApiKey, githubToken, workspaceType);
-        return this.getProbeResult(probeRef.ecc_sys_id, timeoutMs || 15000);
-    },
-
-    /**
-     * Synchronous helper that sends a command and waits for the result.
-     */
-    sendCommandSync: function(sessionId, userId, command, timeoutMs) {
-        var probeRef = this.sendCommand(sessionId, userId, command);
-        return this.getProbeResult(probeRef.ecc_sys_id, timeoutMs || 10000);
-    },
-
-    /**
-     * Synchronous helper that gets output and waits for the result.
-     */
-    getOutputSync: function(sessionId, userId, clear, timeoutMs) {
-        var probeRef = this.getOutput(sessionId, userId, clear);
-        return this.getProbeResult(probeRef.ecc_sys_id, timeoutMs || 10000);
-    },
-
-    type: 'ClaudeTerminalAPI'
+        return { success: false, error: 'Timeout waiting for MID Server response after ' + this.TIMEOUT_MS + 'ms' };
+    }
 };

@@ -1,43 +1,41 @@
-<!-- Claude Terminal Widget - MID Proxy Version -->
-<div class="claude-terminal-mid-proxy">
-  <!-- Header -->
+<div class="claude-terminal-container">
   <div class="terminal-header">
-    <span class="terminal-title">Claude Terminal (MID Proxy)</span>
-    <span class="terminal-status" ng-class="{
-      'status-active': c.status === 'active',
-      'status-connecting': c.status === 'connecting',
-      'status-disconnected': c.status === 'disconnected',
-      'status-error': c.status === 'error'
-    }">
-      {{c.status}}
-    </span>
-    <span class="terminal-mode">via MID Server: {{c.data.midServerName}}</span>
-  </div>
-
-  <!-- Connection Form (shown when disconnected) -->
-  <div class="connection-form" ng-if="c.status === 'disconnected' || c.status === 'error'">
-    <div class="form-group">
-      <label>Anthropic API Key</label>
-      <input type="password"
-             class="form-control"
-             ng-model="c.data.apiKey"
-             placeholder="sk-ant-..."
-             ng-keypress="$event.keyCode === 13 && c.createSession()">
+    <div class="terminal-title">
+      <span class="terminal-icon">&#9654;</span>
+      Claude Code Terminal
+      <span class="mid-badge" ng-if="c.midServer">via MID: {{c.midServer}}</span>
     </div>
-    <div class="alert alert-danger" ng-if="c.error">{{c.error}}</div>
-    <button class="btn btn-primary" ng-click="c.createSession()" ng-disabled="c.status === 'connecting'">
-      <span ng-if="c.status !== 'connecting'">Connect via MID Server</span>
-      <span ng-if="c.status === 'connecting'">Connecting...</span>
-    </button>
+    <div class="terminal-controls">
+      <span class="status-indicator" ng-class="{'connected': c.connected, 'disconnected': !c.connected}">
+        {{c.connected ? 'Connected' : 'Disconnected'}}
+      </span>
+      <button class="btn btn-sm btn-default" ng-click="c.connect()" ng-if="!c.connected"
+              ng-disabled="c.connecting">
+        {{c.connecting ? 'Connecting...' : 'Connect via MID Server'}}
+      </button>
+      <button class="btn btn-sm btn-danger" ng-click="c.disconnect()" ng-if="c.connected">
+        Disconnect
+      </button>
+    </div>
   </div>
 
-  <!-- Terminal -->
-  <div id="terminal-container" class="terminal-container" ng-show="c.status === 'active' || c.status === 'connecting'"></div>
+  <div class="terminal-body">
+    <div id="claude-terminal" class="terminal-output"></div>
+  </div>
 
-  <!-- Footer controls -->
-  <div class="terminal-footer" ng-if="c.status === 'active'">
-    <span class="session-info">Session: {{c.sessionId | limitTo:8}}...</span>
-    <span class="poll-info">Poll: {{c.pollInterval}}ms</span>
-    <button class="btn btn-sm btn-danger" ng-click="c.disconnect()">Disconnect</button>
+  <div class="terminal-input" ng-if="c.connected">
+    <form ng-submit="c.sendCommand()">
+      <div class="input-group">
+        <span class="input-group-addon">$</span>
+        <input type="text" class="form-control" ng-model="c.command"
+               placeholder="Type a command and press Enter..."
+               autofocus autocomplete="off" />
+        <span class="input-group-btn">
+          <button class="btn btn-primary" type="submit" ng-disabled="!c.command">
+            Send
+          </button>
+        </span>
+      </div>
+    </form>
   </div>
 </div>

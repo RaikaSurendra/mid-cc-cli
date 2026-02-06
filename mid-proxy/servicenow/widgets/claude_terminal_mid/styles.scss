@@ -1,117 +1,127 @@
-.claude-terminal-mid-proxy {
-  max-width: 1200px;
-  margin: 0 auto;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+// =============================================================================
+// Claude Terminal MID Widget — Styles
+// =============================================================================
+
+.claude-terminal-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 600px;
+  background: #1e1e2e;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
 
   .terminal-header {
     display: flex;
+    justify-content: space-between;
     align-items: center;
-    gap: 12px;
-    padding: 8px 12px;
-    background: #2d2d2d;
-    border-radius: 8px 8px 0 0;
-    border-bottom: 1px solid #404040;
+    padding: 10px 16px;
+    background: #181825;
+    border-bottom: 1px solid #313244;
 
     .terminal-title {
-      font-weight: 600;
-      color: #e0e0e0;
       font-size: 14px;
-    }
+      font-weight: 600;
+      color: #cdd6f4;
 
-    .terminal-status {
-      font-size: 12px;
-      padding: 2px 8px;
-      border-radius: 10px;
-      text-transform: uppercase;
-      font-weight: 500;
-      letter-spacing: 0.5px;
-
-      &.status-active { background: #1b5e20; color: #a5d6a7; }
-      &.status-connecting { background: #e65100; color: #ffcc02; }
-      &.status-disconnected { background: #424242; color: #9e9e9e; }
-      &.status-error { background: #b71c1c; color: #ef9a9a; }
-    }
-
-    .terminal-mode {
-      font-size: 11px;
-      color: #888;
-      margin-left: auto;
-    }
-  }
-
-  .connection-form {
-    padding: 20px;
-    background: #1e1e1e;
-    border: 1px solid #333;
-
-    .form-group {
-      margin-bottom: 12px;
-
-      label {
-        display: block;
-        color: #ccc;
-        margin-bottom: 4px;
-        font-size: 13px;
+      .terminal-icon {
+        color: #a6e3a1;
+        margin-right: 6px;
       }
 
-      input {
-        background: #2d2d2d;
-        border: 1px solid #555;
-        color: #e0e0e0;
-        padding: 8px;
-        width: 100%;
-        border-radius: 4px;
+      .mid-badge {
+        display: inline-block;
+        margin-left: 8px;
+        padding: 2px 8px;
+        font-size: 11px;
+        font-weight: 500;
+        color: #89b4fa;
+        background: rgba(137, 180, 250, 0.1);
+        border: 1px solid rgba(137, 180, 250, 0.3);
+        border-radius: 12px;
+      }
+    }
 
-        &:focus {
-          outline: none;
-          border-color: #0078d4;
+    .terminal-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+
+      .status-indicator {
+        font-size: 12px;
+        padding: 2px 10px;
+        border-radius: 12px;
+
+        &.connected {
+          color: #a6e3a1;
+          background: rgba(166, 227, 161, 0.1);
+        }
+
+        &.disconnected {
+          color: #f38ba8;
+          background: rgba(243, 139, 168, 0.1);
         }
       }
     }
+  }
 
-    .btn-primary {
-      background: #0078d4;
-      border: none;
-      padding: 8px 24px;
-      border-radius: 4px;
-      cursor: pointer;
+  .terminal-body {
+    flex: 1;
+    padding: 8px;
+    overflow: hidden;
 
-      &:hover { background: #106ebe; }
-      &:disabled { opacity: 0.6; cursor: not-allowed; }
+    #claude-terminal {
+      height: 100%;
+      width: 100%;
     }
   }
 
-  .terminal-container {
-    height: 500px;
-    background: #1e1e1e;
-    border: 1px solid #333;
-    border-top: none;
-  }
+  .terminal-input {
+    padding: 8px 12px;
+    background: #181825;
+    border-top: 1px solid #313244;
 
-  .terminal-footer {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 6px 12px;
-    background: #2d2d2d;
-    border-radius: 0 0 8px 8px;
-    border-top: 1px solid #404040;
+    .input-group {
+      .input-group-addon {
+        background: #313244;
+        border-color: #45475a;
+        color: #a6e3a1;
+        font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+      }
 
-    .session-info {
-      font-size: 11px;
-      color: #888;
-      font-family: 'Menlo', monospace;
-    }
+      .form-control {
+        background: #1e1e2e;
+        border-color: #45475a;
+        color: #cdd6f4;
+        font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+        font-size: 14px;
 
-    .poll-info {
-      font-size: 11px;
-      color: #666;
-      margin-left: auto;
-    }
+        &::placeholder {
+          color: #6c7086;
+        }
 
-    .btn-danger {
-      font-size: 12px;
-      padding: 2px 12px;
+        &:focus {
+          border-color: #89b4fa;
+          box-shadow: 0 0 0 2px rgba(137, 180, 250, 0.2);
+        }
+      }
+
+      .btn-primary {
+        background: #89b4fa;
+        border-color: #89b4fa;
+        color: #1e1e2e;
+        font-weight: 600;
+
+        &:hover {
+          background: #74c7ec;
+          border-color: #74c7ec;
+        }
+
+        &:disabled {
+          opacity: 0.5;
+        }
+      }
     }
   }
 }

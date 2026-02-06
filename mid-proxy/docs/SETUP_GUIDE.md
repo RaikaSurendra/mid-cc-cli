@@ -1,166 +1,131 @@
-# MID Server Proxy Setup Guide
-
-## Overview
-
-This setup replaces the custom ECC Poller with the MID Server acting as a native proxy. The MID Server picks up ECC Queue items and forwards HTTP requests to the Claude Terminal Service.
-
-```
-Original:   ServiceNow -> ECC Queue -> ECC Poller (Go) -> HTTP Service
-MID Proxy:  ServiceNow -> ECC Queue -> MID Server (native) -> HTTP Service
-```
-
-## Architecture Comparison
-
-| Aspect | Original (ECC Poller) | MID Proxy |
-|--------|----------------------|-----------|
-| Services | 4 (postgres, http, poller, mid) | 3 (postgres, http, mid) |
-| ECC polling | Custom Go binary (5s) | MID Server native (~2s) |
-| ServiceNow credentials | Needed by both poller and MID | Only MID Server |
-| Code to maintain | ~300 lines Go (ecc-poller) | ~200 lines JS (ServiceNow) |
-| Monitoring | Custom logging | ServiceNow MID Server dashboard |
-| Failover | Manual | MID Server cluster support |
-| Latency (E2E) | ~5-7s per command roundtrip | ~3-5s per command roundtrip |
+# MID Server Proxy — Setup Guide
 
 ## Prerequisites
 
-1. ServiceNow instance with admin access
-2. MID Server validated and connected
-3. Docker and Docker Compose installed
-4. Original project built (`make build`)
+- Docker + Docker Compose
+- A ServiceNow instance with:
+  - A registered MID Server
+  - Admin access to create Script Includes, Scripted REST APIs, and Widgets
+- The Claude Terminal tables already deployed (from root `servicenow/` update set)
 
-## Step 1: Deploy Docker Services
+## Step 1: Start the Docker Stack
 
 ```bash
 # From project root
-docker compose -f mid-proxy/docker-compose.yml up --build -d
+cd mid-proxy
+
+# Create .env file
+cat > .env << 'EOF'
+SN_INSTANCE_URL=https://your-instance.service-now.com
+SN_USERNAME=mid.user
+SN_PASSWORD=your-mid-password
+MID_SERVER_NAME=mid-docker-proxy
+API_AUTH_TOKEN=your-secure-token
+ENCRYPTION_KEY=your-32-char-hex-key-here-abcdef
+EOF
+
+# Start services
+docker compose up -d
+
+# Verify health
+docker compose ps
+curl http://localhost:3000/health
 ```
 
-This starts 3 services:
-- `midproxy-postgres` (port 5434)
-- `midproxy-terminal-service` (port 3001)
-- `midproxy-mid-server` (MID Server)
+## Step 2: Verify MID Server Connection
 
-## Step 2: ServiceNow Configuration
+1. Go to your ServiceNow instance
+2. Navigate to **MID Server → Servers**
+3. Verify `mid-docker-proxy` shows status **Up**
+4. Run a quick test: **MID Server → Test Connection**
 
-### 2.1 System Properties
+## Step 3: Deploy ServiceNow Artifacts
 
-Navigate to **System Properties > All Properties** and create:
+### Script Includes
 
-| Property | Value |
-|----------|-------|
-| `x_claude.terminal.mid_server` | `k8s-mid-proxy-01` |
+1. Navigate to **System Definition → Script Includes**
+2. Create two Script Includes:
+
+**ClaudeTerminalAPI** (runs on instance):
+- Name: `ClaudeTerminalAPI`
+- Client callable: `false`
+- Active: `true`
+- Script: Copy from `servicenow/script-includes/ClaudeTerminalAPI.js`
+
+**ClaudeTerminalProbe** (runs on MID Server):
+- Name: `ClaudeTerminalProbe`
+- Client callable: `false`
+- Active: `true`
+- **MID Server Script Include**: `true` (check this box!)
+- Script: Copy from `servicenow/script-includes/ClaudeTerminalProbe.js`
+
+### Scripted REST API
+
+1. Navigate to **System Web Services → Scripted REST APIs**
+2. Create new API:
+   - Name: `Claude Terminal MID Proxy`
+   - API ID: `x_claude_terminal_mid`
+   - API namespace: `x_claude`
+3. Create a **Default GET** resource and a **Default POST** resource
+4. In each resource script, paste from `servicenow/scripted-rest/ClaudeTerminalMIDProxyAPI.js`
+
+### System Properties
+
+1. Navigate to **System Properties → Properties**
+2. Create these properties:
+
+| Name | Value |
+|------|-------|
+| `x_claude.terminal.mid_server` | `mid-docker-proxy` |
 | `x_claude.terminal.service_url` | `http://claude-terminal-service:3000` |
-| `x_claude.terminal.auth_token` | `mid-llm-cli-dev-token-2026` |
+| `x_claude.terminal.auth_token` | Same value as `API_AUTH_TOKEN` in .env |
 
-### 2.2 MID Server Script Include
+### Widget (Optional)
 
-1. Navigate to **MID Server > Script Includes**
-2. Click **New**
-3. Set:
-   - **Name:** `ClaudeTerminalProbe`
-   - **Active:** true
-   - **Script:** Paste contents of `servicenow/script-includes/ClaudeTerminalProbe.js`
-4. Save
+1. Navigate to **Service Portal → Widgets**
+2. Create new widget: `Claude Terminal MID`
+3. Copy HTML from `servicenow/widgets/claude_terminal_mid/widget.html`
+4. Copy Client Script from `servicenow/widgets/claude_terminal_mid/client_script.js`
+5. Copy CSS from `servicenow/widgets/claude_terminal_mid/styles.scss`
+6. Add to a Service Portal page
 
-### 2.3 Server-side Script Include
+## Step 4: Test End-to-End
 
-1. Navigate to **System Definition > Script Includes**
-2. Click **New**
-3. Set:
-   - **Name:** `ClaudeTerminalAPI`
-   - **Client callable:** false
-   - **Active:** true
-   - **Script:** Paste contents of `servicenow/script-includes/ClaudeTerminalAPI.js`
-4. Save
-
-### 2.4 Scripted REST API
-
-1. Navigate to **System Web Services > Scripted REST APIs**
-2. Click **New**
-3. Set:
-   - **Name:** Claude Terminal MID Proxy
-   - **API ID:** `x_claude_terminal_mid`
-4. Save, then create these Resources:
-
-| Name | Method | Relative Path | Script Source |
-|------|--------|---------------|---------------|
-| Create Session | POST | `/session` | `ClaudeTerminalMIDProxyAPI.js` (createSession block) |
-| Send Command | POST | `/session/{session_id}/command` | (sendCommand block) |
-| Get Output | GET | `/session/{session_id}/output` | (getOutput block) |
-| Get Status | GET | `/session/{session_id}/status` | (getStatus block) |
-| Terminate | DELETE | `/session/{session_id}` | (terminateSession block) |
-| Resize | POST | `/session/{session_id}/resize` | (resizeTerminal block) |
-
-### 2.5 Service Portal Widget
-
-1. Navigate to **Service Portal > Widgets**
-2. Clone the existing Claude Terminal widget (or create new)
-3. Replace:
-   - **HTML Template:** `widgets/claude_terminal_mid/widget.html`
-   - **Client Script:** `widgets/claude_terminal_mid/client_script.js`
-   - **CSS/SCSS:** `widgets/claude_terminal_mid/styles.scss`
-4. Add to a Service Portal page
-
-## Step 3: Verify
-
-### Test MID Server connectivity:
+### Quick Test via REST
 
 ```bash
-# Check MID Server is connected
-# In ServiceNow: MID Server > Servers > k8s-mid-proxy-01 > Status = Up
-
-# Test HTTP service directly
-curl -s http://localhost:3001/health | python3 -m json.tool
+# Create a session via the MID proxy REST API
+curl -X POST "https://your-instance.service-now.com/api/x_claude/terminal_mid/session" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic $(echo -n 'admin:password' | base64)" \
+  -d '{
+    "credentials": { "anthropicApiKey": "sk-ant-..." },
+    "workspaceType": "temp"
+  }'
 ```
 
-### Test probe execution (from ServiceNow Scripts - Background):
+### Monitor the Flow
 
-```javascript
-var api = new ClaudeTerminalAPI();
-var ref = api.createSession('test.user', 'sk-ant-test-key', '', 'isolated');
-gs.info('Probe submitted: ' + JSON.stringify(ref));
-
-// Wait for result
-var result = api.getProbeResult(ref.ecc_sys_id, 15000);
-gs.info('Result: ' + JSON.stringify(result));
-```
-
-## Step 4: Run Benchmarks (Optional)
-
-Run both setups simultaneously to compare:
-
-```bash
-# Start original setup (port 3000)
-docker compose -f docker-compose.yml up -d
-
-# Start MID proxy setup (port 3001)
-docker compose -f mid-proxy/docker-compose.yml up -d
-
-# Run benchmark
-./mid-proxy/scripts/benchmark.sh
-```
-
-Results are saved to `mid-proxy/benchmark-results/`.
+1. **ECC Queue**: Navigate to `ecc_queue.list` and filter by `topic=JavascriptProbe`
+2. **MID Server Logs**: Check **MID Server → Log Files** for `ClaudeTerminalProbe` entries
+3. **System Logs**: Check `syslog.list` for `ClaudeTerminalAPI` debug messages
 
 ## Troubleshooting
 
-### MID Server not picking up probes
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| "mid_server property not configured" | Missing system property | Add `x_claude.terminal.mid_server` property |
+| Timeout waiting for response | MID Server not picking up probes | Check MID Server is Up, restart if needed |
+| HTTP 502 from REST API | Service unreachable from MID Server | Verify Docker networking, check `service_url` |
+| "Unknown action" in MID logs | Probe parameter mismatch | Verify ClaudeTerminalAPI is sending correct `action` |
+| Widget shows "Disconnected" | REST API errors | Check browser console, verify REST API exists |
 
-1. Check MID Server status in ServiceNow instance
-2. Verify ECC Queue has items: `ecc_queue.list` filter `topic=JavascriptProbe^state=ready`
-3. Check MID Server logs: `docker logs midproxy-mid-server`
+## Benchmarking
 
-### Probe timeout (504 from REST API)
+Compare ECC Poller vs MID Proxy latency:
 
-1. Increase `maxWaitMs` in `ClaudeTerminalAPI.getProbeResult()`
-2. Check MID Server agent log for errors
-3. Verify `claude-terminal-service` is reachable from MID container:
-   ```bash
-   docker exec midproxy-mid-server curl -s http://claude-terminal-service:3000/health
-   ```
+```bash
+./scripts/benchmark.sh
+```
 
-### Script Include not found on MID
-
-1. Ensure the MID Server Script Include is **Active**
-2. Restart the MID Server: `docker restart midproxy-mid-server`
-3. Check MID Server > Script Includes to confirm it synced
+This sends 10 test commands through each approach and reports average roundtrip time.

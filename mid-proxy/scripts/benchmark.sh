@@ -1,227 +1,132 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# =============================================================================
+# MID Proxy vs ECC Poller — Latency Benchmark
+# =============================================================================
+# Compares roundtrip latency between the two approaches by sending
+# test commands through each path and measuring response time.
 #
-# Benchmark: ECC Poller (original) vs MID Server Proxy
-#
-# Measures end-to-end latency for each operation through both paths.
-# Run both setups simultaneously on different ports to compare.
-#
-# Original setup: docker compose -f docker-compose.yml up
-#   -> HTTP Service on port 3000
-#
-# MID Proxy setup: docker compose -f mid-proxy/docker-compose.yml up
-#   -> HTTP Service on port 3001
+# Prerequisites:
+#   - Both stacks running (docker-compose.yml for ECC poller + mid-proxy)
+#   - curl, jq, bc installed
+#   - ServiceNow instance accessible
 #
 # Usage:
-#   chmod +x mid-proxy/scripts/benchmark.sh
 #   ./mid-proxy/scripts/benchmark.sh
+# =============================================================================
 
 set -euo pipefail
 
-# Configuration
-ORIGINAL_URL="http://localhost:3000"
-MIDPROXY_URL="http://localhost:3001"
-AUTH_TOKEN="mid-llm-cli-dev-token-2026"
-ITERATIONS=10
-RESULTS_DIR="mid-proxy/benchmark-results"
+# Configuration — override via environment
+SN_INSTANCE="${SN_INSTANCE_URL:-https://your-instance.service-now.com}"
+SN_AUTH="${SN_AUTH:-admin:password}"  # user:pass for Basic auth
+ITERATIONS="${BENCH_ITERATIONS:-10}"
+API_KEY="${ANTHROPIC_API_KEY:-test-key}"
 
-mkdir -p "$RESULTS_DIR"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RESULTS_FILE="$RESULTS_DIR/benchmark_${TIMESTAMP}.txt"
-
-# Colors
 GREEN='\033[0;32m'
-BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
-echo "=============================================" | tee "$RESULTS_FILE"
-echo " Claude Terminal - Performance Benchmark"      | tee -a "$RESULTS_FILE"
-echo " $(date)"                                      | tee -a "$RESULTS_FILE"
-echo "=============================================" | tee -a "$RESULTS_FILE"
-echo ""                                               | tee -a "$RESULTS_FILE"
+info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+header(){ echo -e "\n${CYAN}═══════════════════════════════════════════════════${NC}"; echo -e "${CYAN}  $*${NC}"; echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"; }
 
-# Helper: measure HTTP request time in milliseconds
-measure_request() {
-    local method=$1
-    local url=$2
-    local data=$3
-    local extra_headers=$4
+AUTH_HEADER="Authorization: Basic $(echo -n "$SN_AUTH" | base64)"
 
-    local start=$(python3 -c 'import time; print(int(time.time() * 1000))')
+# ── Benchmark function ───────────────────────────────────────────────────────
 
-    if [ "$method" = "GET" ]; then
-        curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer $AUTH_TOKEN" \
+benchmark_endpoint() {
+    local label="$1"
+    local url="$2"
+    local method="$3"
+    local data="$4"
+    local total_ms=0
+    local successes=0
+
+    header "$label — $ITERATIONS iterations"
+
+    for i in $(seq 1 "$ITERATIONS"); do
+        start_ms=$(date +%s%3N)
+
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X "$method" \
             -H "Content-Type: application/json" \
-            $extra_headers \
-            "$url" 2>/dev/null
-    elif [ "$method" = "POST" ]; then
-        curl -s -o /dev/null -w "%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer $AUTH_TOKEN" \
-            -H "Content-Type: application/json" \
-            $extra_headers \
+            -H "$AUTH_HEADER" \
             -d "$data" \
-            "$url" 2>/dev/null
-    elif [ "$method" = "DELETE" ]; then
-        curl -s -o /dev/null -w "%{http_code}" \
-            -X DELETE \
-            -H "Authorization: Bearer $AUTH_TOKEN" \
-            -H "Content-Type: application/json" \
-            $extra_headers \
-            "$url" 2>/dev/null
-    fi
+            "$url" 2>/dev/null || echo "000")
 
-    local end=$(python3 -c 'import time; print(int(time.time() * 1000))')
-    echo $((end - start))
-}
+        end_ms=$(date +%s%3N)
+        elapsed=$((end_ms - start_ms))
 
-# Helper: measure and store results
-benchmark_operation() {
-    local name=$1
-    local method=$2
-    local path=$3
-    local data=$4
-    local extra_headers=$5
-    local base_url=$6
-    local label=$7
+        if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            successes=$((successes + 1))
+            total_ms=$((total_ms + elapsed))
+            echo "  [$i/$ITERATIONS] ${elapsed}ms (HTTP $http_code)"
+        else
+            echo "  [$i/$ITERATIONS] FAILED (HTTP $http_code) — ${elapsed}ms"
+        fi
 
-    local total=0
-    local min=999999
-    local max=0
-    local times=()
-
-    for i in $(seq 1 $ITERATIONS); do
-        local ms=$(measure_request "$method" "${base_url}${path}" "$data" "$extra_headers")
-        times+=($ms)
-        total=$((total + ms))
-        if [ $ms -lt $min ]; then min=$ms; fi
-        if [ $ms -gt $max ]; then max=$ms; fi
+        sleep 1  # Don't hammer the instance
     done
 
-    local avg=$((total / ITERATIONS))
+    echo ""
+    if [ "$successes" -gt 0 ]; then
+        avg=$(echo "scale=1; $total_ms / $successes" | bc)
+        info "$label: avg=${avg}ms over $successes successful requests"
+    else
+        warn "$label: No successful requests"
+    fi
 
-    printf "  %-25s avg=%4dms  min=%4dms  max=%4dms\n" "$label" "$avg" "$min" "$max" | tee -a "$RESULTS_FILE"
+    echo "$successes $total_ms"
 }
 
-# ==============================
-# Test 1: Health Check Latency
-# ==============================
-echo -e "${GREEN}Test 1: Health Check Latency ($ITERATIONS iterations)${NC}" | tee -a "$RESULTS_FILE"
+# ── Main ─────────────────────────────────────────────────────────────────────
 
-benchmark_operation "health" "GET" "/health" "" "" "$ORIGINAL_URL" "Original (direct):"
-benchmark_operation "health" "GET" "/health" "" "" "$MIDPROXY_URL" "MID Proxy:"
-echo "" | tee -a "$RESULTS_FILE"
+echo ""
+header "Claude Terminal — Latency Benchmark"
+echo "Instance:   $SN_INSTANCE"
+echo "Iterations: $ITERATIONS"
+echo ""
 
-# ==============================
-# Test 2: Session Create Latency
-# ==============================
-echo -e "${GREEN}Test 2: Session Create + Terminate ($ITERATIONS iterations)${NC}" | tee -a "$RESULTS_FILE"
+# Test 1: ECC Poller path (original REST API)
+ECC_URL="${SN_INSTANCE}/api/x_claude/terminal/session"
+ECC_DATA='{"credentials":{"anthropicApiKey":"'"$API_KEY"'"},"workspaceType":"temp"}'
+ECC_RESULT=$(benchmark_endpoint "ECC Poller Path" "$ECC_URL" "POST" "$ECC_DATA")
 
-# Original
-create_total_orig=0
-for i in $(seq 1 $ITERATIONS); do
-    start=$(python3 -c 'import time; print(int(time.time() * 1000))')
+echo ""
 
-    session_id=$(curl -s -X POST \
-        -H "Authorization: Bearer $AUTH_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"userId":"bench_user","credentials":{"anthropicApiKey":"sk-test-key"},"workspaceType":"isolated"}' \
-        "${ORIGINAL_URL}/api/session/create" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('sessionId',''))" 2>/dev/null || echo "")
+# Test 2: MID Proxy path (new REST API)
+MID_URL="${SN_INSTANCE}/api/x_claude/terminal_mid/session"
+MID_DATA='{"credentials":{"anthropicApiKey":"'"$API_KEY"'"},"workspaceType":"temp"}'
+MID_RESULT=$(benchmark_endpoint "MID Proxy Path" "$MID_URL" "POST" "$MID_DATA")
 
-    end=$(python3 -c 'import time; print(int(time.time() * 1000))')
-    ms=$((end - start))
-    create_total_orig=$((create_total_orig + ms))
+# ── Summary ──────────────────────────────────────────────────────────────────
 
-    # Cleanup
-    if [ -n "$session_id" ]; then
-        curl -s -X DELETE \
-            -H "Authorization: Bearer $AUTH_TOKEN" \
-            -H "X-User-ID: bench_user" \
-            "${ORIGINAL_URL}/api/session/${session_id}" >/dev/null 2>&1 || true
+echo ""
+header "Summary"
+
+ECC_SUCCESSES=$(echo "$ECC_RESULT" | tail -1 | awk '{print $1}')
+ECC_TOTAL=$(echo "$ECC_RESULT" | tail -1 | awk '{print $2}')
+MID_SUCCESSES=$(echo "$MID_RESULT" | tail -1 | awk '{print $1}')
+MID_TOTAL=$(echo "$MID_RESULT" | tail -1 | awk '{print $2}')
+
+if [ "$ECC_SUCCESSES" -gt 0 ] && [ "$MID_SUCCESSES" -gt 0 ]; then
+    ECC_AVG=$(echo "scale=1; $ECC_TOTAL / $ECC_SUCCESSES" | bc)
+    MID_AVG=$(echo "scale=1; $MID_TOTAL / $MID_SUCCESSES" | bc)
+    DIFF=$(echo "scale=1; $ECC_AVG - $MID_AVG" | bc)
+
+    echo "  ECC Poller:  avg ${ECC_AVG}ms ($ECC_SUCCESSES/$ITERATIONS successful)"
+    echo "  MID Proxy:   avg ${MID_AVG}ms ($MID_SUCCESSES/$ITERATIONS successful)"
+    echo ""
+
+    if [ "$(echo "$DIFF > 0" | bc)" -eq 1 ]; then
+        info "MID Proxy is ${DIFF}ms faster per request"
+    else
+        DIFF_ABS=$(echo "$DIFF * -1" | bc)
+        warn "ECC Poller is ${DIFF_ABS}ms faster per request"
     fi
-done
-avg_orig=$((create_total_orig / ITERATIONS))
-printf "  %-25s avg=%4dms\n" "Original (direct):" "$avg_orig" | tee -a "$RESULTS_FILE"
-
-# MID Proxy
-create_total_mid=0
-for i in $(seq 1 $ITERATIONS); do
-    start=$(python3 -c 'import time; print(int(time.time() * 1000))')
-
-    session_id=$(curl -s -X POST \
-        -H "Authorization: Bearer $AUTH_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"userId":"bench_user","credentials":{"anthropicApiKey":"sk-test-key"},"workspaceType":"isolated"}' \
-        "${MIDPROXY_URL}/api/session/create" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('sessionId',''))" 2>/dev/null || echo "")
-
-    end=$(python3 -c 'import time; print(int(time.time() * 1000))')
-    ms=$((end - start))
-    create_total_mid=$((create_total_mid + ms))
-
-    # Cleanup
-    if [ -n "$session_id" ]; then
-        curl -s -X DELETE \
-            -H "Authorization: Bearer $AUTH_TOKEN" \
-            -H "X-User-ID: bench_user" \
-            "${MIDPROXY_URL}/api/session/${session_id}" >/dev/null 2>&1 || true
-    fi
-done
-avg_mid=$((create_total_mid / ITERATIONS))
-printf "  %-25s avg=%4dms\n" "MID Proxy:" "$avg_mid" | tee -a "$RESULTS_FILE"
-echo "" | tee -a "$RESULTS_FILE"
-
-# ==============================
-# Test 3: Command Send Latency
-# ==============================
-echo -e "${GREEN}Test 3: Send Command Latency ($ITERATIONS iterations)${NC}" | tee -a "$RESULTS_FILE"
-
-# Create sessions for testing
-orig_session=$(curl -s -X POST \
-    -H "Authorization: Bearer $AUTH_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"userId":"bench_cmd","credentials":{"anthropicApiKey":"sk-test-key"},"workspaceType":"isolated"}' \
-    "${ORIGINAL_URL}/api/session/create" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('sessionId',''))" 2>/dev/null || echo "")
-
-mid_session=$(curl -s -X POST \
-    -H "Authorization: Bearer $AUTH_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"userId":"bench_cmd","credentials":{"anthropicApiKey":"sk-test-key"},"workspaceType":"isolated"}' \
-    "${MIDPROXY_URL}/api/session/create" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('sessionId',''))" 2>/dev/null || echo "")
-
-if [ -n "$orig_session" ]; then
-    benchmark_operation "cmd" "POST" "/api/session/${orig_session}/command" \
-        '{"command":"echo test\n"}' "-H 'X-User-ID: bench_cmd'" "$ORIGINAL_URL" "Original (direct):"
+else
+    warn "Insufficient successful requests for comparison"
 fi
 
-if [ -n "$mid_session" ]; then
-    benchmark_operation "cmd" "POST" "/api/session/${mid_session}/command" \
-        '{"command":"echo test\n"}' "-H 'X-User-ID: bench_cmd'" "$MIDPROXY_URL" "MID Proxy:"
-fi
-
-# Cleanup
-[ -n "$orig_session" ] && curl -s -X DELETE -H "Authorization: Bearer $AUTH_TOKEN" -H "X-User-ID: bench_cmd" "${ORIGINAL_URL}/api/session/${orig_session}" >/dev/null 2>&1 || true
-[ -n "$mid_session" ] && curl -s -X DELETE -H "Authorization: Bearer $AUTH_TOKEN" -H "X-User-ID: bench_cmd" "${MIDPROXY_URL}/api/session/${mid_session}" >/dev/null 2>&1 || true
-
-echo "" | tee -a "$RESULTS_FILE"
-
-# ==============================
-# Summary
-# ==============================
-echo "=============================================" | tee -a "$RESULTS_FILE"
-echo " Summary" | tee -a "$RESULTS_FILE"
-echo "=============================================" | tee -a "$RESULTS_FILE"
-echo "" | tee -a "$RESULTS_FILE"
-echo "Original setup:  ECC Poller -> direct HTTP to Go service" | tee -a "$RESULTS_FILE"
-echo "MID Proxy setup: MID Server -> JavascriptProbe -> HTTP to Go service" | tee -a "$RESULTS_FILE"
-echo "" | tee -a "$RESULTS_FILE"
-echo "Note: MID Proxy latency includes:" | tee -a "$RESULTS_FILE"
-echo "  - ECC Queue write (~1-2s)" | tee -a "$RESULTS_FILE"
-echo "  - MID Server pickup (~1-3s)" | tee -a "$RESULTS_FILE"
-echo "  - Probe execution (~50-200ms)" | tee -a "$RESULTS_FILE"
-echo "  - ECC Queue response write (~1-2s)" | tee -a "$RESULTS_FILE"
-echo "" | tee -a "$RESULTS_FILE"
-echo "Direct HTTP tests above measure only the Go service layer." | tee -a "$RESULTS_FILE"
-echo "For true E2E comparison, measure from the ServiceNow widget." | tee -a "$RESULTS_FILE"
-echo "" | tee -a "$RESULTS_FILE"
-echo "Results saved to: $RESULTS_FILE" | tee -a "$RESULTS_FILE"
+echo ""

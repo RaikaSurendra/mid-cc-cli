@@ -1,135 +1,99 @@
-# MID Server Proxy Setup - 3 Services (No ECC Poller)
-# The MID Server natively polls ECC Queue and proxies requests to the HTTP Service.
+# =============================================================================
+# MID Proxy Stack — Claude Terminal Service + MID Server
+# =============================================================================
+# Alternative to the ECC Poller approach. Uses ServiceNow MID Server's native
+# JavascriptProbe framework to relay commands instead of custom Go polling.
 #
 # Usage:
-#   docker compose -f mid-proxy/docker-compose.yml up --build
+#   docker compose -f mid-proxy/docker-compose.yml up -d
 #
-# Compare with original setup:
-#   docker compose -f docker-compose.yml up --build
+# Architecture:
+#   ServiceNow Instance
+#     → ECC Queue (JavascriptProbe)
+#       → MID Server (ClaudeTerminalProbe.js)
+#         → HTTP → claude-terminal-service:3000
+#           → PTY session (Claude Code CLI)
+#
+# Compared to ECC Poller:
+#   - Eliminates the custom Go poller binary
+#   - Uses MID Server's native probe pickup (~2s vs 5s polling)
+#   - 3 services instead of 4
+# =============================================================================
 
 services:
-  # PostgreSQL for session persistence
+  # PostgreSQL — session persistence
   postgres:
-    image: postgres:15-alpine
-    container_name: midproxy-postgres
+    image: postgres:16-alpine
+    container_name: mid-proxy-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: claude_user
-      POSTGRES_PASSWORD: claude_password
       POSTGRES_DB: claude_terminal
+      POSTGRES_USER: claude
+      POSTGRES_PASSWORD: claude_dev_password
     ports:
-      - "5434:5432"
+      - "5433:5432"
     volumes:
-      - midproxy-postgres-data:/var/lib/postgresql/data
+      - mid_proxy_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U claude_user -d claude_terminal"]
+      test: ["CMD-SHELL", "pg_isready -U claude -d claude_terminal"]
       interval: 10s
       timeout: 5s
-      start_period: 5s
       retries: 5
-    networks:
-      - midproxy-network
 
-  # Claude Terminal HTTP Service (same binary, no changes)
+  # Claude Terminal HTTP Service — same binary, no changes needed
   claude-terminal-service:
     build:
       context: ..
       dockerfile: Dockerfile
-    container_name: midproxy-terminal-service
+    container_name: mid-proxy-terminal-service
     restart: unless-stopped
-    environment:
-      # Server
-      NODE_SERVICE_HOST: "0.0.0.0"
-      NODE_SERVICE_PORT: "3000"
-      GIN_MODE: "release"
-      # Logging
-      LOG_LEVEL: "info"
-      LOG_FILE: "/var/log/claude-terminal-service.log"
-      # Session
-      SESSION_TIMEOUT_MINUTES: "30"
-      MAX_SESSIONS_PER_USER: "3"
-      OUTPUT_BUFFER_SIZE: "100"
-      WORKSPACE_BASE_PATH: "/tmp/claude-sessions"
-      WORKSPACE_TYPE: "isolated"
-      # Security - HTTP service no longer needs ServiceNow credentials
-      ENCRYPTION_KEY: "${ENCRYPTION_KEY:-d7c88b96c626497f2109f0d1134bc7dcb0d7cae4b88b8632ff616beff9942c58}"
-      API_AUTH_TOKEN: "${API_AUTH_TOKEN:-mid-llm-cli-dev-token-2026}"
-      CORS_ALLOWED_ORIGINS: "http://localhost"
-      # Database
-      DB_HOST: "postgres"
-      DB_PORT: "5432"
-      DB_USER: "claude_user"
-      DB_PASSWORD: "claude_password"
-      DB_NAME: "claude_terminal"
-      DB_SSLMODE: "disable"
-      # ServiceNow - only needed for config.Load() validation
-      # In this setup, MID Server handles all ServiceNow communication
-      SERVICENOW_INSTANCE: "${SERVICENOW_INSTANCE:-empsuren.service-now.com}"
-      SERVICENOW_API_USER: "${SERVICENOW_API_USER:-mid.user}"
-      SERVICENOW_API_PASSWORD: "${SERVICENOW_API_PASSWORD:-placeholder}"
-    ports:
-      - "3001:3000"
-    volumes:
-      - midproxy-sessions:/tmp/claude-sessions
-      - midproxy-logs:/var/log
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
-      start_period: 5s
-      retries: 3
     depends_on:
       postgres:
         condition: service_healthy
-    networks:
-      - midproxy-network
-
-  # ServiceNow MID Server - Acts as ECC Queue proxy
-  # Picks up ECC items natively and forwards to claude-terminal-service via HTTP
-  servicenow-mid-server:
-    image: servicenow-mid-server:zurich-patch4-hotfix3
-    container_name: midproxy-mid-server
-    restart: unless-stopped
     environment:
-      MID_INSTANCE_URL: "https://${SERVICENOW_INSTANCE:-empsuren.service-now.com}"
-      MID_INSTANCE_USERNAME: "${SERVICENOW_API_USER:-mid.user}"
-      MID_INSTANCE_PASSWORD: "${SERVICENOW_API_PASSWORD:-_7PJmFo!ifiuc6X9cVV-}"
-      MID_SERVER_NAME: "${MID_SERVER_NAME:-k8s-mid-proxy-01}"
-      # Custom property: tell probe where the terminal service lives
-      CLAUDE_TERMINAL_URL: "http://claude-terminal-service:3000"
-      CLAUDE_TERMINAL_TOKEN: "${API_AUTH_TOKEN:-mid-llm-cli-dev-token-2026}"
-    volumes:
-      - midproxy-mid-work:/opt/snc_mid_server/agent/work
-      - midproxy-mid-logs:/opt/snc_mid_server/agent/logs
-      # Mount custom probe scripts into MID Server
-      - ./mid-server-scripts:/opt/snc_mid_server/agent/scripts/custom:ro
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "3000"
+      API_AUTH_TOKEN: "${API_AUTH_TOKEN:-dev-token-change-me}"
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef}"
+      DATABASE_URL: "postgres://claude:claude_dev_password@postgres:5432/claude_terminal?sslmode=disable"
+      LOG_LEVEL: "debug"
+    ports:
+      - "3000:3000"
     healthcheck:
-      test: ["CMD", "bash", "-c", "pgrep -f 'mid' > /dev/null || exit 1"]
-      interval: 5m
-      timeout: 15s
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
       retries: 3
-      start_period: 3m
+
+  # ServiceNow MID Server — picks up JavascriptProbes from ECC Queue
+  # and executes ClaudeTerminalProbe.js which calls claude-terminal-service
+  servicenow-mid-server:
+    image: servicenow/mid:latest
+    container_name: mid-proxy-mid-server
+    restart: unless-stopped
     depends_on:
       claude-terminal-service:
         condition: service_healthy
-    networks:
-      - midproxy-network
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 4G
-        reservations:
-          cpus: '0.5'
-          memory: 1G
+    environment:
+      # ServiceNow instance connection
+      SN_INSTANCE_URL: "${SN_INSTANCE_URL:-https://your-instance.service-now.com}"
+      SN_USERNAME: "${SN_USERNAME:-mid.user}"
+      SN_PASSWORD: "${SN_PASSWORD}"
+      MID_SERVER_NAME: "${MID_SERVER_NAME:-mid-docker-proxy}"
+      # MID Server config
+      SN_MID_MUTUAL_AUTH: "false"
+    volumes:
+      - mid_proxy_middata:/opt/servicenow/mid/agent
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 5
 
 volumes:
-  midproxy-postgres-data:
-  midproxy-sessions:
-  midproxy-logs:
-  midproxy-mid-work:
-  midproxy-mid-logs:
-
-networks:
-  midproxy-network:
-    driver: bridge
+  mid_proxy_pgdata:
+    name: mid-proxy-pgdata
+  mid_proxy_middata:
+    name: mid-proxy-middata

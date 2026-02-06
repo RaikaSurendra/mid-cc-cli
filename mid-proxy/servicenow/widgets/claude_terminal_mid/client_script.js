@@ -1,264 +1,181 @@
-/**
- * Claude Terminal Widget - MID Proxy Version
- *
- * Client-side controller for the Service Portal widget.
- * Uses the MID Proxy Scripted REST API instead of direct ECC Queue writes.
- *
- * Differences from original widget:
- *   - API calls go through /api/x_claude/terminal_mid/* (MID proxy)
- *   - No direct ECC Queue manipulation
- *   - Slightly higher latency per call (~2-3s MID Server roundtrip)
- *   - Built-in retry on 504 (MID timeout)
- *
- * Dependencies:
- *   - xterm.js (loaded via CDN or Service Portal dependency)
- *   - xterm-addon-fit
- */
+// =============================================================================
+// Claude Terminal MID Widget — Client Script (AngularJS)
+// =============================================================================
+// Service Portal widget controller for the MID Server proxy variant.
+// Uses the Scripted REST API (/api/x_claude/terminal_mid) which routes
+// through the MID Server instead of the ECC Queue poller.
+// =============================================================================
+
 api.controller = function($scope, $http, $interval, $timeout) {
-    'use strict';
-
     var c = this;
-    var terminal = null;
-    var fitAddon = null;
 
-    // State
-    c.sessionId = null;
-    c.status = 'disconnected';
-    c.error = null;
-    c.polling = null;
-    c.pollInterval = 500; // Start at 500ms (MID proxy is slower than direct)
-    c.maxPollInterval = 5000;
-    c.minPollInterval = 200;
-    c.consecutiveEmpty = 0;
+    // ── State ───────────────────────────────────────────────────────────
+    c.connected   = false;
+    c.connecting  = false;
+    c.sessionId   = null;
+    c.command     = '';
+    c.midServer   = '';
+    c.outputLines = [];
 
-    // API base path (MID Proxy Scripted REST API)
-    var API_BASE = '/api/x_claude/terminal_mid';
+    var pollInterval = null;
+    var terminal     = null;
+    var BASE_URL     = '/api/x_claude/terminal_mid';
 
-    /**
-     * Initialize xterm.js terminal
-     */
-    c.initTerminal = function() {
-        var termContainer = document.getElementById('terminal-container');
-        if (!termContainer) return;
+    // ── xterm.js initialization ─────────────────────────────────────────
+    function initTerminal() {
+        if (terminal) {
+            terminal.dispose();
+        }
 
         terminal = new Terminal({
             cursorBlink: true,
             fontSize: 14,
             fontFamily: 'Menlo, Monaco, "Courier New", monospace',
             theme: {
-                background: '#1e1e1e',
-                foreground: '#d4d4d4',
-                cursor: '#d4d4d4'
+                background: '#1e1e2e',
+                foreground: '#cdd6f4',
+                cursor: '#f5e0dc',
+                selectionBackground: '#45475a'
             },
+            rows: 30,
             cols: 120,
-            rows: 30
+            scrollback: 5000
         });
 
-        fitAddon = new FitAddon.FitAddon();
-        terminal.loadAddon(fitAddon);
-        terminal.open(termContainer);
-        fitAddon.fit();
+        var container = document.getElementById('claude-terminal');
+        if (container) {
+            container.innerHTML = '';
+            terminal.open(container);
+            terminal.writeln('Claude Code Terminal (MID Server Proxy)');
+            terminal.writeln('─'.repeat(50));
+            terminal.writeln('');
+        }
+    }
 
-        // Handle user input
-        terminal.onData(function(data) {
-            if (c.sessionId && c.status === 'active') {
-                c.sendCommand(data);
+    // ── Connect to terminal session ─────────────────────────────────────
+    c.connect = function() {
+        if (c.connecting || c.connected) return;
+
+        c.connecting = true;
+        initTerminal();
+
+        terminal.writeln('\\x1b[33mConnecting via MID Server...\\x1b[0m');
+
+        $http.post(BASE_URL + '/session', {
+            credentials: {
+                anthropicApiKey: c.data.apiKey || ''
+            },
+            workspaceType: 'temp'
+        }).then(function(resp) {
+            var data = resp.data;
+
+            if (data.sessionId) {
+                c.sessionId  = data.sessionId;
+                c.connected  = true;
+                c.connecting = false;
+                c.midServer  = data.midServer || '';
+
+                terminal.writeln('\\x1b[32mConnected! Session: ' + c.sessionId + '\\x1b[0m');
+                terminal.writeln('\\x1b[90mWorkspace: ' + (data.workspacePath || 'temp') + '\\x1b[0m');
+                terminal.writeln('');
+
+                startPolling();
+            } else {
+                c.connecting = false;
+                terminal.writeln('\\x1b[31mFailed to create session: ' +
+                    (data.error || 'Unknown error') + '\\x1b[0m');
             }
+        }).catch(function(err) {
+            c.connecting = false;
+            var msg = (err.data && err.data.error) || err.statusText || 'Connection failed';
+            terminal.writeln('\\x1b[31mError: ' + msg + '\\x1b[0m');
         });
-
-        // Handle terminal resize
-        terminal.onResize(function(size) {
-            if (c.sessionId && c.status === 'active') {
-                c.resizeTerminal(size.cols, size.rows);
-            }
-        });
-
-        // Window resize handler
-        window.addEventListener('resize', function() {
-            if (fitAddon) fitAddon.fit();
-        });
-
-        terminal.writeln('Claude Terminal (MID Proxy Mode)');
-        terminal.writeln('Type your Anthropic API key and press Connect to start.');
-        terminal.writeln('');
     };
 
-    /**
-     * Create a new session via MID Server proxy.
-     */
-    c.createSession = function() {
-        if (!c.data.apiKey) {
-            c.error = 'Please enter your Anthropic API key';
-            return;
+    // ── Send command ────────────────────────────────────────────────────
+    c.sendCommand = function() {
+        if (!c.command || !c.connected || !c.sessionId) return;
+
+        var cmd = c.command;
+        c.command = '';
+
+        terminal.writeln('\\x1b[36m$ ' + cmd + '\\x1b[0m');
+
+        $http.post(BASE_URL + '/session/' + c.sessionId + '/command', {
+            command: cmd
+        }).catch(function(err) {
+            var msg = (err.data && err.data.error) || 'Failed to send command';
+            terminal.writeln('\\x1b[31mError: ' + msg + '\\x1b[0m');
+        });
+    };
+
+    // ── Poll for output ─────────────────────────────────────────────────
+    function startPolling() {
+        if (pollInterval) {
+            $interval.cancel(pollInterval);
         }
 
-        c.status = 'connecting';
-        c.error = null;
-        terminal.writeln('Connecting via MID Server proxy...');
+        pollInterval = $interval(function() {
+            if (!c.connected || !c.sessionId) return;
 
-        $http.post(API_BASE + '/session', {
-            anthropicApiKey: c.data.apiKey,
-            workspaceType: 'isolated'
-        }).then(function(resp) {
-            if (resp.data && resp.data.sessionId) {
-                c.sessionId = resp.data.sessionId;
-                c.status = 'active';
-                terminal.writeln('Session created: ' + c.sessionId);
-                terminal.writeln('');
-                c.startPolling();
-            } else {
-                c.status = 'error';
-                c.error = 'Unexpected response from MID Server';
-                terminal.writeln('ERROR: Unexpected response');
-            }
-        }).catch(function(err) {
-            c.status = 'error';
-            if (err.status === 504) {
-                c.error = 'MID Server did not respond in time. Is it running?';
-            } else {
-                c.error = err.data ? err.data.error : 'Connection failed';
-            }
-            terminal.writeln('ERROR: ' + c.error);
-        });
-    };
-
-    /**
-     * Send a command to the session.
-     */
-    c.sendCommand = function(command) {
-        if (!c.sessionId) return;
-
-        $http.post(API_BASE + '/session/' + c.sessionId + '/command', {
-            command: command
-        }).then(function() {
-            // Reset poll interval for fast output retrieval
-            c.pollInterval = c.minPollInterval;
-            c.consecutiveEmpty = 0;
-        }).catch(function(err) {
-            if (err.status === 504) {
-                // MID timeout - command may still have been delivered
-                console.warn('MID timeout on send_command, will retry output poll');
-            } else {
-                terminal.writeln('\r\nERROR sending command: ' + (err.data ? err.data.error : 'unknown'));
-            }
-        });
-    };
-
-    /**
-     * Poll for output from the session.
-     * Uses adaptive polling: fast when there's output, slow when idle.
-     */
-    c.startPolling = function() {
-        if (c.polling) return;
-
-        var poll = function() {
-            if (!c.sessionId || c.status !== 'active') {
-                c.stopPolling();
-                return;
-            }
-
-            $http.get(API_BASE + '/session/' + c.sessionId + '/output', {
+            $http.get(BASE_URL + '/session/' + c.sessionId + '/output', {
                 params: { clear: 'true' }
             }).then(function(resp) {
-                if (resp.data && resp.data.output && resp.data.output.length > 0) {
-                    // Write output to terminal
-                    resp.data.output.forEach(function(chunk) {
-                        terminal.write(chunk.data);
+                var data = resp.data;
+
+                if (data.output && data.output.length > 0) {
+                    data.output.forEach(function(chunk) {
+                        if (chunk.data) {
+                            terminal.write(chunk.data);
+                        }
                     });
-
-                    // Fast polling when we have output
-                    c.consecutiveEmpty = 0;
-                    c.pollInterval = c.minPollInterval;
-                } else {
-                    // Adaptive backoff when no output
-                    c.consecutiveEmpty++;
-                    if (c.consecutiveEmpty > 5) {
-                        c.pollInterval = Math.min(c.pollInterval * 1.5, c.maxPollInterval);
-                    }
                 }
 
-                // Check session status
-                if (resp.data && resp.data.status === 'terminated') {
-                    c.status = 'disconnected';
-                    terminal.writeln('\r\nSession terminated.');
-                    c.stopPolling();
-                    return;
+                // Check if session ended
+                if (data.status === 'terminated' || data.status === 'error') {
+                    terminal.writeln('');
+                    terminal.writeln('\\x1b[33mSession ended: ' + data.status + '\\x1b[0m');
+                    c.disconnect();
                 }
-
-                // Schedule next poll
-                c.polling = $timeout(poll, c.pollInterval);
-
             }).catch(function(err) {
-                if (err.status === 504) {
-                    // MID timeout - retry with backoff
-                    c.pollInterval = Math.min(c.pollInterval * 2, c.maxPollInterval);
-                    c.polling = $timeout(poll, c.pollInterval);
-                } else {
-                    terminal.writeln('\r\nERROR: Lost connection to session');
-                    c.status = 'error';
-                    c.stopPolling();
+                // Session might have been terminated
+                if (err.status === 404) {
+                    terminal.writeln('\\x1b[31mSession not found — disconnecting.\\x1b[0m');
+                    c.disconnect();
                 }
             });
-        };
+        }, 2000); // Poll every 2 seconds (faster than ECC poller's 5s)
+    }
 
-        // Start first poll
-        c.polling = $timeout(poll, c.pollInterval);
-    };
+    // ── Disconnect ──────────────────────────────────────────────────────
+    c.disconnect = function() {
+        if (pollInterval) {
+            $interval.cancel(pollInterval);
+            pollInterval = null;
+        }
 
-    /**
-     * Stop polling for output.
-     */
-    c.stopPolling = function() {
-        if (c.polling) {
-            $timeout.cancel(c.polling);
-            c.polling = null;
+        if (c.sessionId && c.connected) {
+            $http.delete(BASE_URL + '/session/' + c.sessionId).catch(function() {
+                // Best-effort cleanup
+            });
+        }
+
+        c.connected  = false;
+        c.connecting = false;
+        c.sessionId  = null;
+
+        if (terminal) {
+            terminal.writeln('');
+            terminal.writeln('\\x1b[90mDisconnected.\\x1b[0m');
         }
     };
 
-    /**
-     * Resize the terminal on the server side.
-     */
-    c.resizeTerminal = function(cols, rows) {
-        if (!c.sessionId) return;
-
-        $http.post(API_BASE + '/session/' + c.sessionId + '/resize', {
-            cols: cols,
-            rows: rows
-        }).catch(function() {
-            // Resize failures are non-critical
-            console.warn('Failed to resize terminal');
-        });
-    };
-
-    /**
-     * Terminate the current session.
-     */
-    c.disconnect = function() {
-        if (!c.sessionId) return;
-
-        c.stopPolling();
-        terminal.writeln('\r\nDisconnecting...');
-
-        $http.delete(API_BASE + '/session/' + c.sessionId).then(function() {
-            terminal.writeln('Session terminated.');
-            c.sessionId = null;
-            c.status = 'disconnected';
-        }).catch(function() {
-            // Force local cleanup even if server call fails
-            c.sessionId = null;
-            c.status = 'disconnected';
-            terminal.writeln('Disconnected (server may still be cleaning up).');
-        });
-    };
-
-    // Initialize terminal on load
-    $timeout(function() {
-        c.initTerminal();
-    }, 100);
-
-    // Cleanup on scope destroy
+    // ── Cleanup on scope destroy ────────────────────────────────────────
     $scope.$on('$destroy', function() {
-        c.stopPolling();
-        if (terminal) terminal.dispose();
+        c.disconnect();
+        if (terminal) {
+            terminal.dispose();
+            terminal = null;
+        }
     });
 };
