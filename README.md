@@ -1,137 +1,236 @@
 # Claude Code Integration for ServiceNow MID Server
 
-A comprehensive terminal-based integration that brings Claude Code CLI capabilities directly into your ServiceNow environment using MID Servers.
+A terminal-based integration that brings Claude Code CLI capabilities into your ServiceNow environment. Supports two deployment modes: **ECC Poller** (custom Go binary) and **MID Server Proxy** (native ServiceNow pattern).
 
 ## Overview
 
-This solution provides an interactive terminal UI in ServiceNow that connects to Claude Code CLI running on a MID server, enabling users to leverage Claude's AI-powered coding capabilities within their ServiceNow environment.
+This solution provides an interactive terminal UI in ServiceNow that connects to Claude Code CLI running alongside a MID Server, enabling users to leverage Claude's AI-powered coding capabilities within their ServiceNow environment.
 
 ### Key Features
 
-- 🖥️ **Interactive Terminal**: xterm.js-based terminal in ServiceNow UI
-- ⚡ **Real-time Communication**: AMB notifications + adaptive polling (100ms-5s)
-- 🔒 **User Isolation**: Separate Claude Code session per user with encrypted credentials
-- 💾 **Session Persistence**: Resume capability for interrupted sessions
-- 📊 **Audit Trail**: All commands and outputs logged in ServiceNow
-- 🔐 **Secure Credentials**: User-based API key isolation with encryption
+- Interactive xterm.js terminal in ServiceNow Service Portal
+- Real-time communication via AMB notifications + adaptive polling
+- Per-user session isolation with encrypted credentials (AES-256-GCM)
+- PostgreSQL session persistence with async writes
+- Bearer token auth with constant-time comparison
+- Per-IP rate limiting (10 req/s, token bucket)
+- PTY input sanitization and path traversal prevention
+- Two deployment modes for performance comparison
 
 ## Architecture
 
+This project supports two modes of bridging ServiceNow to the Claude Terminal HTTP Service:
+
+### Mode 1: ECC Poller (Default)
+
+A custom Go binary polls the ECC Queue and forwards commands to the HTTP service.
+
 ```
-ServiceNow Instance                          MID Server
-┌──────────────────────────┐                ┌────────────────────────┐
-│                          │                │                        │
-│  Service Portal Widget   │                │  Go HTTP Service       │
-│  (xterm.js terminal)     │                │  (localhost:3000)      │
-│         │                │                │         │              │
-│         ↓                │                │         ↓              │
-│  Scripted REST API       │   ECC Queue    │  Session Manager       │
-│  + Session Table         │◄──────────────►│  + PTY Handler         │
-│         │                │   (5s poll)    │         │              │
-│         ↓                │                │         ↓              │
-│  AMB Notifications       │                │  Claude Code CLI       │
-│  (output_available)      │                │  (interactive mode)    │
-│                          │                │                        │
-└──────────────────────────┘                └────────────────────────┘
+ServiceNow Instance                         MID Server Host
++-------------------------+                +---------------------------+
+|                         |                |                           |
+|  Service Portal Widget  |                |  ECC Poller (Go)          |
+|  (xterm.js)             |                |  polls every 5s           |
+|        |                |                |        |                  |
+|        v                |                |        v                  |
+|  Scripted REST API      |   ECC Queue    |  HTTP Service (Go/Gin)   |
+|  + Session Table        |<-------------->|  :3000                    |
+|        |                |                |        |                  |
+|        v                |                |        v                  |
+|  AMB Notifications      |                |  Session Manager + PTY   |
+|                         |                |        |                  |
++-------------------------+                |        v                  |
+                                           |  Claude Code CLI          |
+                                           |                           |
+                                           |  PostgreSQL (persistence) |
+                                           +---------------------------+
 ```
 
-## Components
+### Mode 2: MID Server Proxy
 
-### MID Server Components (Go)
+The MID Server natively polls the ECC Queue and executes a JavascriptProbe that forwards HTTP requests. No custom poller needed.
 
-1. **HTTP Service** (`cmd/server/main.go`)
-   - Manages Claude Code CLI sessions via PTY
-   - REST API for session management
-   - Output buffering and streaming
-   - Session timeout handling
+```
+ServiceNow Instance                         MID Server Host
++-------------------------+                +---------------------------+
+|                         |                |                           |
+|  Service Portal Widget  |                |  MID Server (native)      |
+|  (xterm.js)             |                |  polls every ~2s          |
+|        |                |                |        |                  |
+|        v                |                |        v                  |
+|  Scripted REST API      |   ECC Queue    |  ClaudeTerminalProbe.js  |
+|  (JavascriptProbe)      |<-------------->|  (MID Script Include)     |
+|        |                |                |        |                  |
+|        v                |                |        v (HTTP)           |
+|  ClaudeTerminalAPI      |                |  HTTP Service (Go/Gin)   |
+|  (Script Include)       |                |  :3000                    |
+|                         |                |        |                  |
++-------------------------+                |        v                  |
+                                           |  Session Manager + PTY   |
+                                           |        |                  |
+                                           |        v                  |
+                                           |  Claude Code CLI          |
+                                           |                           |
+                                           |  PostgreSQL (persistence) |
+                                           +---------------------------+
+```
 
-2. **ECC Queue Poller** (`cmd/ecc-poller/main.go`)
-   - Polls ServiceNow ECC Queue for commands
-   - Routes commands to HTTP service
-   - Returns results to ServiceNow
+### Mode Comparison
 
-### ServiceNow Components
+| Aspect | ECC Poller | MID Server Proxy |
+|--------|-----------|-----------------|
+| Docker services | 4 (postgres, http, poller, mid) | 3 (postgres, http, mid) |
+| ECC poll interval | ~5s (configurable) | ~1-3s (native) |
+| E2E command latency | ~5-10s | ~3-7s |
+| Code to maintain | ~300 lines Go | ~200 lines JS (ServiceNow) |
+| ServiceNow credentials | Needed by poller + MID | Only MID Server |
+| Monitoring | Custom logging | ServiceNow MID dashboard |
+| Failover | Manual | MID Server cluster support |
+| Memory overhead | ~20MB (Go poller) | MID Server JVM (1-4GB) |
 
-1. **Tables**
-   - `x_claude_terminal_session`: Session management
-   - `x_claude_credentials`: Encrypted user credentials
+## Project Structure
 
-2. **REST API**
-   - Session CRUD operations
-   - Command/output handling
-   - Credential management
-
-3. **Widgets**
-   - `claude_terminal`: Interactive terminal UI
-   - `claude_credential_setup`: API key configuration
-
-4. **Business Rules**
-   - AMB notifications on output updates
+```
+mid-llm-cli/
+├── cmd/
+│   ├── server/main.go                 # HTTP service entry point
+│   └── ecc-poller/main.go             # ECC Queue poller entry point
+├── internal/
+│   ├── config/config.go               # Configuration (env vars)
+│   ├── server/server.go               # REST API handlers + auth
+│   ├── session/session.go             # PTY session manager
+│   ├── store/postgres.go              # PostgreSQL persistence
+│   ├── servicenow/client.go           # ServiceNow + HTTP clients
+│   ├── crypto/crypto.go               # AES-256-GCM encryption
+│   ├── logging/logging.go             # Structured logging
+│   └── middleware/ratelimit.go        # Per-IP rate limiting
+├── mid-proxy/                          # MID Server Proxy setup
+│   ├── docker-compose.yml             # 3-service deployment
+│   ├── docs/                          # Architecture + setup guide
+│   ├── scripts/benchmark.sh           # Side-by-side perf comparison
+│   └── servicenow/                    # Script includes, REST API, widget
+├── servicenow/                         # ServiceNow components (original)
+│   ├── tables/                        # Table definitions
+│   ├── rest-api/                      # Scripted REST API
+│   ├── business-rules/                # AMB notifications
+│   └── widgets/                       # Service Portal widgets
+├── kubernetes/                         # K8s deployment manifests
+├── deployment/systemd/                 # systemd unit files
+├── scripts/                            # Build/test/verify scripts
+├── docs/                               # Low-level design document
+├── Dockerfile                          # Multi-stage Docker build
+├── docker-compose.yml                  # 4-service orchestration (Mode 1)
+├── Makefile                            # Build automation
+└── .env.example                        # Configuration template
+```
 
 ## Prerequisites
 
+- Go 1.24+
+- Docker and Docker Compose
 - ServiceNow instance (Tokyo or later)
-- MID Server with:
-  - Go 1.21+ installed
-  - Claude Code CLI installed
-  - Network access to ServiceNow instance
-  - 2GB+ RAM recommended
+- Claude Code CLI (`npm install -g @anthropic-ai/claude-code`)
+- PostgreSQL 15 (included in Docker Compose)
 
-## Installation
+## Quick Start (Docker)
 
-### 1. MID Server Setup
+### Mode 1: ECC Poller (Default)
 
 ```bash
-# Clone repository to MID Server
-cd /opt/servicenow-mid
-git clone <repo-url> claude-terminal-service
-
-# Navigate to project directory
-cd claude-terminal-service
-
-# Copy and configure environment
+# Configure environment
 cp .env.example .env
-nano .env  # Edit with your ServiceNow details
+# Edit .env with your ServiceNow instance details, encryption key, and auth token
 
-# Build the binaries
-make build
+# Build and start all 4 services
+docker compose up --build -d
 
-# Or build manually
-go build -o bin/claude-terminal-service cmd/server/main.go
-go build -o bin/ecc-poller cmd/ecc-poller/main.go
+# Verify
+curl http://localhost:3000/health
+docker compose ps
 ```
 
-### 2. Configure Environment Variables
-
-Edit `.env`:
+### Mode 2: MID Server Proxy
 
 ```bash
+# Build and start 3 services (no ECC Poller)
+docker compose -f mid-proxy/docker-compose.yml up --build -d
+
+# Verify
+curl http://localhost:3001/health
+docker compose -f mid-proxy/docker-compose.yml ps
+
+# Then configure ServiceNow (see mid-proxy/docs/SETUP_GUIDE.md)
+```
+
+### Run Both for Comparison
+
+```bash
+# Start Mode 1 on port 3000
+docker compose up --build -d
+
+# Start Mode 2 on port 3001
+docker compose -f mid-proxy/docker-compose.yml up --build -d
+
+# Run benchmark
+./mid-proxy/scripts/benchmark.sh
+```
+
+## Installation (Manual)
+
+### 1. Build
+
+```bash
+# Download dependencies and build binaries
+make build
+
+# Outputs:
+#   bin/claude-terminal-service
+#   bin/ecc-poller
+```
+
+### 2. Configure
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your configuration:
+
+```bash
+# ServiceNow
 SERVICENOW_INSTANCE=your-instance.service-now.com
 SERVICENOW_API_USER=integration_user
 SERVICENOW_API_PASSWORD=your_password
 MID_SERVER_NAME=your_mid_server_name
 
+# Server
 NODE_SERVICE_PORT=3000
 NODE_SERVICE_HOST=localhost
+GIN_MODE=release
 
-WORKSPACE_BASE_PATH=/tmp/claude-sessions
-WORKSPACE_TYPE=isolated
+# Security (required in release mode)
+API_AUTH_TOKEN=your-secure-token
+ENCRYPTION_KEY=your-64-char-hex-key  # generate: openssl rand -hex 32
 
-SESSION_TIMEOUT_MINUTES=30
-MAX_SESSIONS_PER_USER=3
-
-LOG_LEVEL=info
-LOG_FILE=/var/log/claude-terminal-service.log
+# Database (optional, omit DB_HOST for in-memory only)
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=postgres
+DB_PASSWORD=postgres
+DB_NAME=claude_terminal
+DB_SSLMODE=disable
 ```
 
-### 3. ServiceNow Configuration
+See `.env.example` for all available options.
+
+### 3. ServiceNow Setup
 
 #### Import Tables
 
 1. Navigate to **System Definition > Tables**
-2. Import table definitions from:
-   - `servicenow/tables/x_claude_terminal_session.json`
-   - `servicenow/tables/x_claude_credentials.json`
+2. Import from `servicenow/tables/`:
+   - `x_claude_terminal_session.json`
+   - `x_claude_credentials.json`
 
 #### Import REST API
 
@@ -146,194 +245,178 @@ LOG_FILE=/var/log/claude-terminal-service.log
 #### Import Widgets
 
 1. Navigate to **Service Portal > Widgets**
-2. Create widget `claude_terminal`:
-   - Copy from `servicenow/widgets/claude_terminal/`
-3. Create widget `claude_credential_setup`:
-   - Copy from `servicenow/widgets/claude_credential_setup/`
+2. Create widget `claude_terminal` from `servicenow/widgets/claude_terminal/`
+3. Create widget `claude_credential_setup` from `servicenow/widgets/claude_credential_setup/`
 
-#### Configure ACLs
-
-Create the following ACLs:
-
-**Table: x_claude_terminal_session**
-- Users can CRUD their own sessions (user = current user)
-- Admins can read all sessions
-
-**Table: x_claude_credentials**
-- Users can CRUD their own credentials (user = current user)
-- No admin access to credential values
+#### For MID Server Proxy mode, additionally follow: `mid-proxy/docs/SETUP_GUIDE.md`
 
 ### 4. Start Services
 
 ```bash
-# Start HTTP service
+# Option A: Direct
 ./bin/claude-terminal-service &
-
-# Start ECC Queue poller
 ./bin/ecc-poller &
 
-# Or use systemd (recommended)
+# Option B: systemd
 sudo cp deployment/systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable claude-terminal-service
-sudo systemctl enable claude-ecc-poller
-sudo systemctl start claude-terminal-service
-sudo systemctl start claude-ecc-poller
+sudo systemctl enable --now claude-terminal-service
+sudo systemctl enable --now claude-ecc-poller
+
+# Option C: Docker (recommended)
+docker compose up --build -d
 ```
 
-## Usage
+## HTTP API Reference
 
-### User Setup
+All `/api/*` endpoints require `Authorization: Bearer <token>`. Session-specific endpoints require `X-User-ID` header.
 
-1. Navigate to **Claude Credential Setup** page
-2. Enter your Anthropic API key
-3. (Optional) Add GitHub token for enhanced integration
-4. Test connection
-5. Save credentials
+| Method | Path | Auth | User-ID | Description |
+|--------|------|------|---------|-------------|
+| `GET` | `/health` | No | No | Health check + diagnostics |
+| `POST` | `/api/session/create` | Yes | No | Create Claude session |
+| `POST` | `/api/session/:id/command` | Yes | Yes | Send command to PTY |
+| `GET` | `/api/session/:id/output` | Yes | Yes | Get buffered output |
+| `GET` | `/api/session/:id/status` | Yes | Yes | Get session status |
+| `POST` | `/api/session/:id/resize` | Yes | Yes | Resize terminal |
+| `DELETE` | `/api/session/:id` | Yes | Yes | Terminate session |
+| `GET` | `/api/sessions` | Yes | Yes | List user's sessions |
 
-### Using Claude Terminal
+### Examples
 
-1. Navigate to **Claude Terminal** page
-2. Terminal will initialize automatically
-3. Type commands and interact with Claude Code
-4. Sessions auto-save and can be resumed
-5. Click "Terminate" to end session
+```bash
+TOKEN="your-auth-token"
 
-## API Reference
+# Health check
+curl http://localhost:3000/health
 
-### REST API Endpoints
+# Create session
+curl -X POST http://localhost:3000/api/session/create \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"userId":"john.doe","credentials":{"anthropicApiKey":"sk-ant-..."},"workspaceType":"isolated"}'
 
-#### Create Session
-```http
-POST /api/now/claude/terminal/session/create
-Content-Type: application/json
+# Send command
+curl -X POST http://localhost:3000/api/session/{sessionId}/command \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-User-ID: john.doe" \
+  -H "Content-Type: application/json" \
+  -d '{"command":"help\n"}'
 
-{
-  "workspaceType": "isolated"
-}
-```
+# Get output
+curl http://localhost:3000/api/session/{sessionId}/output?clear=true \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-User-ID: john.doe"
 
-#### Send Command
-```http
-POST /api/now/claude/terminal/session/{sessionId}/command
-Content-Type: application/json
-
-{
-  "command": "help\n"
-}
-```
-
-#### Get Output
-```http
-GET /api/now/claude/terminal/session/{sessionId}/output?clear=true
-```
-
-#### Get Status
-```http
-GET /api/now/claude/terminal/session/{sessionId}/status
-```
-
-#### Terminate Session
-```http
-DELETE /api/now/claude/terminal/session/{sessionId}
+# Terminate
+curl -X DELETE http://localhost:3000/api/session/{sessionId} \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-User-ID: john.doe"
 ```
 
 ## Security
 
-### Credential Storage
+### Authentication & Authorization
 
-- API keys are encrypted using ServiceNow's password2 field type
-- Keys are never transmitted to client browsers
-- Each user can only access their own credentials
-- Keys are passed to MID Server via encrypted HTTPS
+- **API Auth:** Bearer token with `crypto/subtle.ConstantTimeCompare`
+- **User Ownership:** Mandatory `X-User-ID` header; sessions bound to creator
+- **Rate Limiting:** 10 req/s per IP with token bucket algorithm
+- **CORS:** Configurable origin allowlist (no wildcard)
+- **TLS:** Optional HTTPS with minimum TLS 1.2
 
-### Session Isolation
+### Credential Protection
 
-- Each user gets separate Claude Code CLI process
-- Isolated workspace directories per session
-- No cross-user data access
-- Automatic cleanup on session end
+- API keys encrypted at rest with AES-256-GCM
+- 32-byte hex encryption key (generated via `openssl rand -hex 32`)
+- Credentials decrypted only in server memory for PTY env vars
+- ServiceNow stores keys in `password2` field type
 
-### Audit Logging
+### Input Validation
 
-All activities are logged:
-- Session creation/termination
-- Commands executed (truncated)
-- Output size and timing
-- Errors and failures
-
-## Troubleshooting
-
-### Session won't start
-
-1. Check MID Server logs: `tail -f /var/log/claude-terminal-service.log`
-2. Verify Claude CLI is installed: `claude --version`
-3. Check API key is valid in credential setup
-4. Verify MID Server can reach ServiceNow
-
-### No output appearing
-
-1. Check AMB notifications are enabled
-2. Verify ECC Queue poller is running
-3. Check browser console for errors
-4. Increase polling frequency in widget
-
-### Performance issues
-
-1. Reduce `MAX_SESSIONS_PER_USER` in .env
-2. Increase `SESSION_TIMEOUT_MINUTES` to free resources
-3. Monitor MID Server resources
-4. Consider adding more MID Servers
+- User IDs: regex `^[a-zA-Z0-9_-]+$` (no path traversal)
+- Workspace paths: `filepath.Abs` + prefix check under base path
+- PTY commands: control char sanitization (allows only `\n`, `\r`, `\t`)
+- Command size: max 16,384 bytes
+- Command rate: 100ms minimum interval per session
 
 ## Development
 
-### Build
-
 ```bash
+# Build
 make build
-```
 
-### Run Tests
-
-```bash
+# Run tests
 make test
+
+# Run with race detector
+make test-race
+
+# Coverage report
+make test-coverage
+
+# Run benchmarks
+make bench
+
+# Format code
+make fmt
+
+# Lint
+make lint
+
+# Full integration test suite
+./scripts/run-tests.sh
 ```
 
-### Run Locally
+## Documentation
 
-```bash
-make run
-```
+| Document | Description |
+|----------|-------------|
+| `docs/LOW_LEVEL_DESIGN.md` | Detailed LLD with component design, data flows, DB schema |
+| `mid-proxy/docs/ARCHITECTURE.md` | MID Proxy architecture and comparison |
+| `mid-proxy/docs/SETUP_GUIDE.md` | MID Proxy deployment instructions |
+| `DEPLOYMENT.md` | Production deployment guide |
+| `TESTING_GUIDE.md` | Test strategy and execution |
+| `kubernetes/KUBERNETES_DEPLOYMENT.md` | K8s deployment instructions |
+| `servicenow/INSTALLATION_GUIDE.md` | ServiceNow component setup |
 
-### Clean
+## Troubleshooting
 
-```bash
-make clean
-```
+### Service won't start
 
-## Contributing
+- **"API_AUTH_TOKEN must be configured":** Set `API_AUTH_TOKEN` in `.env` (required in release mode)
+- **Log file permission denied:** Change `LOG_FILE` to a writable path (e.g., `./service.log`)
+- **Go version mismatch:** Ensure Go 1.24+ (check `go.mod`)
 
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
+### Session creation fails
 
-## License
+- **"executable file not found":** Install Claude CLI (`npm install -g @anthropic-ai/claude-code`)
+- **"invalid user ID":** User ID must match `^[a-zA-Z0-9_-]+$`
+- **"max sessions exceeded":** Increase `MAX_SESSIONS_PER_USER` or terminate existing sessions
 
-MIT License - see LICENSE file for details
+### No output in terminal
 
-## Support
+- Check ECC Poller is running: `docker logs ecc-poller`
+- Verify AMB notifications are enabled in ServiceNow
+- Check browser console for widget errors
+- Try direct API call: `curl .../api/session/{id}/output`
 
-For issues and questions:
-- GitHub Issues: [repo-url]/issues
-- ServiceNow Community: [community-link]
+### Database connection issues
+
+- PostgreSQL is optional; service falls back to in-memory if `DB_HOST` is empty
+- Check connectivity: `docker exec claude-postgres pg_isready`
+- Verify credentials match between `.env` and `docker-compose.yml`
 
 ## Roadmap
 
+- [ ] WebSocket endpoint for real-time output streaming
 - [ ] Multi-MID Server load balancing
-- [ ] WebSocket direct connection option
 - [ ] Session sharing and collaboration
-- [ ] Enhanced audit dashboard
+- [ ] Enhanced audit dashboard in ServiceNow
 - [ ] Integration with ServiceNow ITSM workflows
 - [ ] Custom Claude prompts/templates
+
+## License
+
+MIT License with Additional Disclaimer - see LICENSE file for details.
+
+**USE AT YOUR OWN RISK.** The authors assume no responsibility for any damage, data loss, security incidents, or API costs resulting from the use of this software.
