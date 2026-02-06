@@ -1,0 +1,135 @@
+# MID Server Proxy Setup - 3 Services (No ECC Poller)
+# The MID Server natively polls ECC Queue and proxies requests to the HTTP Service.
+#
+# Usage:
+#   docker compose -f mid-proxy/docker-compose.yml up --build
+#
+# Compare with original setup:
+#   docker compose -f docker-compose.yml up --build
+
+services:
+  # PostgreSQL for session persistence
+  postgres:
+    image: postgres:15-alpine
+    container_name: midproxy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: claude_user
+      POSTGRES_PASSWORD: claude_password
+      POSTGRES_DB: claude_terminal
+    ports:
+      - "5434:5432"
+    volumes:
+      - midproxy-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U claude_user -d claude_terminal"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 5
+    networks:
+      - midproxy-network
+
+  # Claude Terminal HTTP Service (same binary, no changes)
+  claude-terminal-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: midproxy-terminal-service
+    restart: unless-stopped
+    environment:
+      # Server
+      NODE_SERVICE_HOST: "0.0.0.0"
+      NODE_SERVICE_PORT: "3000"
+      GIN_MODE: "release"
+      # Logging
+      LOG_LEVEL: "info"
+      LOG_FILE: "/var/log/claude-terminal-service.log"
+      # Session
+      SESSION_TIMEOUT_MINUTES: "30"
+      MAX_SESSIONS_PER_USER: "3"
+      OUTPUT_BUFFER_SIZE: "100"
+      WORKSPACE_BASE_PATH: "/tmp/claude-sessions"
+      WORKSPACE_TYPE: "isolated"
+      # Security - HTTP service no longer needs ServiceNow credentials
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:-d7c88b96c626497f2109f0d1134bc7dcb0d7cae4b88b8632ff616beff9942c58}"
+      API_AUTH_TOKEN: "${API_AUTH_TOKEN:-mid-llm-cli-dev-token-2026}"
+      CORS_ALLOWED_ORIGINS: "http://localhost"
+      # Database
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      DB_USER: "claude_user"
+      DB_PASSWORD: "claude_password"
+      DB_NAME: "claude_terminal"
+      DB_SSLMODE: "disable"
+      # ServiceNow - only needed for config.Load() validation
+      # In this setup, MID Server handles all ServiceNow communication
+      SERVICENOW_INSTANCE: "${SERVICENOW_INSTANCE:-empsuren.service-now.com}"
+      SERVICENOW_API_USER: "${SERVICENOW_API_USER:-mid.user}"
+      SERVICENOW_API_PASSWORD: "${SERVICENOW_API_PASSWORD:-placeholder}"
+    ports:
+      - "3001:3000"
+    volumes:
+      - midproxy-sessions:/tmp/claude-sessions
+      - midproxy-logs:/var/log
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 5s
+      retries: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - midproxy-network
+
+  # ServiceNow MID Server - Acts as ECC Queue proxy
+  # Picks up ECC items natively and forwards to claude-terminal-service via HTTP
+  servicenow-mid-server:
+    image: servicenow-mid-server:zurich-patch4-hotfix3
+    container_name: midproxy-mid-server
+    restart: unless-stopped
+    environment:
+      MID_INSTANCE_URL: "https://${SERVICENOW_INSTANCE:-empsuren.service-now.com}"
+      MID_INSTANCE_USERNAME: "${SERVICENOW_API_USER:-mid.user}"
+      MID_INSTANCE_PASSWORD: "${SERVICENOW_API_PASSWORD:-_7PJmFo!ifiuc6X9cVV-}"
+      MID_SERVER_NAME: "${MID_SERVER_NAME:-k8s-mid-proxy-01}"
+      # Custom property: tell probe where the terminal service lives
+      CLAUDE_TERMINAL_URL: "http://claude-terminal-service:3000"
+      CLAUDE_TERMINAL_TOKEN: "${API_AUTH_TOKEN:-mid-llm-cli-dev-token-2026}"
+    volumes:
+      - midproxy-mid-work:/opt/snc_mid_server/agent/work
+      - midproxy-mid-logs:/opt/snc_mid_server/agent/logs
+      # Mount custom probe scripts into MID Server
+      - ./mid-server-scripts:/opt/snc_mid_server/agent/scripts/custom:ro
+    healthcheck:
+      test: ["CMD", "bash", "-c", "pgrep -f 'mid' > /dev/null || exit 1"]
+      interval: 5m
+      timeout: 15s
+      retries: 3
+      start_period: 3m
+    depends_on:
+      claude-terminal-service:
+        condition: service_healthy
+    networks:
+      - midproxy-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+
+volumes:
+  midproxy-postgres-data:
+  midproxy-sessions:
+  midproxy-logs:
+  midproxy-mid-work:
+  midproxy-mid-logs:
+
+networks:
+  midproxy-network:
+    driver: bridge

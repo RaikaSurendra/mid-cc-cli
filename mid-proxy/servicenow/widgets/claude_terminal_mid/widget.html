@@ -1,0 +1,43 @@
+<!-- Claude Terminal Widget - MID Proxy Version -->
+<div class="claude-terminal-mid-proxy">
+  <!-- Header -->
+  <div class="terminal-header">
+    <span class="terminal-title">Claude Terminal (MID Proxy)</span>
+    <span class="terminal-status" ng-class="{
+      'status-active': c.status === 'active',
+      'status-connecting': c.status === 'connecting',
+      'status-disconnected': c.status === 'disconnected',
+      'status-error': c.status === 'error'
+    }">
+      {{c.status}}
+    </span>
+    <span class="terminal-mode">via MID Server: {{c.data.midServerName}}</span>
+  </div>
+
+  <!-- Connection Form (shown when disconnected) -->
+  <div class="connection-form" ng-if="c.status === 'disconnected' || c.status === 'error'">
+    <div class="form-group">
+      <label>Anthropic API Key</label>
+      <input type="password"
+             class="form-control"
+             ng-model="c.data.apiKey"
+             placeholder="sk-ant-..."
+             ng-keypress="$event.keyCode === 13 && c.createSession()">
+    </div>
+    <div class="alert alert-danger" ng-if="c.error">{{c.error}}</div>
+    <button class="btn btn-primary" ng-click="c.createSession()" ng-disabled="c.status === 'connecting'">
+      <span ng-if="c.status !== 'connecting'">Connect via MID Server</span>
+      <span ng-if="c.status === 'connecting'">Connecting...</span>
+    </button>
+  </div>
+
+  <!-- Terminal -->
+  <div id="terminal-container" class="terminal-container" ng-show="c.status === 'active' || c.status === 'connecting'"></div>
+
+  <!-- Footer controls -->
+  <div class="terminal-footer" ng-if="c.status === 'active'">
+    <span class="session-info">Session: {{c.sessionId | limitTo:8}}...</span>
+    <span class="poll-info">Poll: {{c.pollInterval}}ms</span>
+    <button class="btn btn-sm btn-danger" ng-click="c.disconnect()">Disconnect</button>
+  </div>
+</div>

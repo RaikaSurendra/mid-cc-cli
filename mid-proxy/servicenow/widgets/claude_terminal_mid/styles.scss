@@ -1,0 +1,117 @@
+.claude-terminal-mid-proxy {
+  max-width: 1200px;
+  margin: 0 auto;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+
+  .terminal-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: #2d2d2d;
+    border-radius: 8px 8px 0 0;
+    border-bottom: 1px solid #404040;
+
+    .terminal-title {
+      font-weight: 600;
+      color: #e0e0e0;
+      font-size: 14px;
+    }
+
+    .terminal-status {
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      text-transform: uppercase;
+      font-weight: 500;
+      letter-spacing: 0.5px;
+
+      &.status-active { background: #1b5e20; color: #a5d6a7; }
+      &.status-connecting { background: #e65100; color: #ffcc02; }
+      &.status-disconnected { background: #424242; color: #9e9e9e; }
+      &.status-error { background: #b71c1c; color: #ef9a9a; }
+    }
+
+    .terminal-mode {
+      font-size: 11px;
+      color: #888;
+      margin-left: auto;
+    }
+  }
+
+  .connection-form {
+    padding: 20px;
+    background: #1e1e1e;
+    border: 1px solid #333;
+
+    .form-group {
+      margin-bottom: 12px;
+
+      label {
+        display: block;
+        color: #ccc;
+        margin-bottom: 4px;
+        font-size: 13px;
+      }
+
+      input {
+        background: #2d2d2d;
+        border: 1px solid #555;
+        color: #e0e0e0;
+        padding: 8px;
+        width: 100%;
+        border-radius: 4px;
+
+        &:focus {
+          outline: none;
+          border-color: #0078d4;
+        }
+      }
+    }
+
+    .btn-primary {
+      background: #0078d4;
+      border: none;
+      padding: 8px 24px;
+      border-radius: 4px;
+      cursor: pointer;
+
+      &:hover { background: #106ebe; }
+      &:disabled { opacity: 0.6; cursor: not-allowed; }
+    }
+  }
+
+  .terminal-container {
+    height: 500px;
+    background: #1e1e1e;
+    border: 1px solid #333;
+    border-top: none;
+  }
+
+  .terminal-footer {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 12px;
+    background: #2d2d2d;
+    border-radius: 0 0 8px 8px;
+    border-top: 1px solid #404040;
+
+    .session-info {
+      font-size: 11px;
+      color: #888;
+      font-family: 'Menlo', monospace;
+    }
+
+    .poll-info {
+      font-size: 11px;
+      color: #666;
+      margin-left: auto;
+    }
+
+    .btn-danger {
+      font-size: 12px;
+      padding: 2px 12px;
+    }
+  }
+}
