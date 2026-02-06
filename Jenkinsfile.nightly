@@ -1,0 +1,346 @@
+// =============================================================================
+// Claude Terminal MID Service — Nightly Build Pipeline
+// =============================================================================
+// Runs every night at 2 AM. Performs the full test suite, benchmarks,
+// security scanning, and pushes a :nightly tagged Docker image.
+// =============================================================================
+
+pipeline {
+    agent {
+        docker {
+            image 'golang:1.24-alpine'
+            args '-v go-mod-cache:/go/pkg/mod -v /var/run/docker.sock:/var/run/docker.sock'
+        }
+    }
+
+    triggers {
+        // Run at approximately 2 AM daily. The H hash distributes load
+        // across the hour so multiple projects don't all start at 2:00 sharp.
+        cron('H 2 * * *')
+    }
+
+    environment {
+        GOPATH       = "${WORKSPACE}/.go"
+        GOBIN        = "${WORKSPACE}/.go/bin"
+        CGO_ENABLED  = '0'
+        PATH         = "${GOBIN}:/usr/local/go/bin:${PATH}"
+
+        IMAGE_NAME   = 'claude-terminal-service'
+        IMAGE_TAG    = 'nightly'
+        REGISTRY     = credentials('docker-registry-url')
+        NIGHTLY_DATE = sh(script: 'date +%Y%m%d', returnStdout: true).trim()
+    }
+
+    options {
+        timeout(time: 60, unit: 'MINUTES')
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+    }
+
+    stages {
+
+        // =====================================================================
+        // Stage 1: Checkout
+        // =====================================================================
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh 'git log --oneline -5'
+            }
+        }
+
+        // =====================================================================
+        // Stage 2: Dependencies
+        // =====================================================================
+        stage('Dependencies') {
+            steps {
+                sh '''
+                    apk add --no-cache make git bash curl docker-compose
+
+                    echo "--- Downloading Go modules ---"
+                    go mod download
+                    go mod verify
+                '''
+            }
+        }
+
+        // =====================================================================
+        // Stage 3: Full Test Suite with Coverage
+        // =====================================================================
+        stage('Full Test Suite') {
+            steps {
+                sh '''
+                    echo "--- Installing gotestsum ---"
+                    go install gotest.tools/gotestsum@latest
+
+                    echo "--- Running full test suite with coverage ---"
+                    ${GOBIN}/gotestsum \
+                        --junitfile test-results.xml \
+                        --format testdox \
+                        -- -v -coverprofile=coverage.out -covermode=atomic ./...
+
+                    echo "--- Coverage summary ---"
+                    go tool cover -func=coverage.out | tail -1
+                    go tool cover -html=coverage.out -o coverage.html
+                '''
+            }
+            post {
+                always {
+                    junit testResults: 'test-results.xml', allowEmptyResults: true
+                    publishHTML(target: [
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: '.',
+                        reportFiles: 'coverage.html',
+                        reportName: 'Nightly Coverage Report'
+                    ])
+                }
+            }
+        }
+
+        // =====================================================================
+        // Stage 4: Race Detection
+        // =====================================================================
+        stage('Race Detection') {
+            steps {
+                sh '''
+                    echo "--- Running race detector ---"
+                    CGO_ENABLED=1 go test -race -count=3 ./...
+                '''
+            }
+        }
+
+        // =====================================================================
+        // Stage 5: Integration Tests — Both Modes
+        // =====================================================================
+        stage('Integration Tests') {
+            stages {
+                stage('Mode 1: ECC Poller') {
+                    steps {
+                        sh '''
+                            echo "--- Starting ECC Poller mode (docker-compose.yml) ---"
+                            docker compose up -d postgres claude-terminal-service ecc-poller
+
+                            echo "--- Waiting for services ---"
+                            sleep 20
+
+                            for i in $(seq 1 12); do
+                                if curl -sf http://claude-terminal-service:3000/health; then
+                                    echo "ECC Poller mode is healthy."
+                                    break
+                                fi
+                                echo "Waiting... (attempt $i/12)"
+                                sleep 5
+                            done
+
+                            echo "--- Running integration tests against ECC Poller mode ---"
+                            bash scripts/run-tests.sh || true
+                        '''
+                    }
+                    post {
+                        always {
+                            sh 'docker compose down --volumes --remove-orphans || true'
+                        }
+                    }
+                }
+
+                stage('Mode 2: MID Proxy') {
+                    steps {
+                        sh '''
+                            echo "--- Starting MID Proxy mode ---"
+                            if [ -f mid-proxy/docker-compose.yml ]; then
+                                docker compose -f mid-proxy/docker-compose.yml up -d postgres claude-terminal-service
+
+                                echo "--- Waiting for services ---"
+                                sleep 20
+
+                                for i in $(seq 1 12); do
+                                    if curl -sf http://claude-terminal-service:3001/health; then
+                                        echo "MID Proxy mode is healthy."
+                                        break
+                                    fi
+                                    echo "Waiting... (attempt $i/12)"
+                                    sleep 5
+                                done
+
+                                echo "--- Running integration tests against MID Proxy mode ---"
+                                NODE_SERVICE_PORT=3001 bash scripts/run-tests.sh || true
+                            else
+                                echo "mid-proxy/docker-compose.yml not found, skipping Mode 2."
+                            fi
+                        '''
+                    }
+                    post {
+                        always {
+                            sh '''
+                                docker compose -f mid-proxy/docker-compose.yml down --volumes --remove-orphans 2>/dev/null || true
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // Stage 6: Benchmark Tests with Historical Comparison
+        // =====================================================================
+        stage('Benchmarks') {
+            steps {
+                sh '''
+                    echo "--- Running benchmarks ---"
+                    mkdir -p benchmarks
+
+                    go test -bench=. -benchmem -benchtime=3s -count=5 ./internal/session/ \
+                        | tee benchmarks/session.txt
+                    go test -bench=. -benchmem -benchtime=3s -count=5 ./internal/server/ \
+                        | tee benchmarks/server.txt
+                    go test -bench=. -benchmem -benchtime=3s -count=5 ./internal/config/ \
+                        | tee benchmarks/config.txt
+
+                    # Combine into a single file for benchstat
+                    cat benchmarks/session.txt benchmarks/server.txt benchmarks/config.txt \
+                        > benchmarks/nightly_${NIGHTLY_DATE}.txt
+
+                    echo "--- Historical comparison ---"
+                    if [ -f benchmarks/baseline.txt ]; then
+                        go install golang.org/x/perf/cmd/benchstat@latest
+                        echo "Comparing against baseline:"
+                        ${GOBIN}/benchstat benchmarks/baseline.txt benchmarks/nightly_${NIGHTLY_DATE}.txt || true
+                    else
+                        echo "No baseline found. Saving current run as baseline."
+                        cp benchmarks/nightly_${NIGHTLY_DATE}.txt benchmarks/baseline.txt
+                    fi
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'benchmarks/*.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
+        // =====================================================================
+        // Stage 7: Security Scan (Trivy + govulncheck)
+        // =====================================================================
+        stage('Security Scan') {
+            parallel {
+                stage('Trivy Image Scan') {
+                    steps {
+                        sh '''
+                            echo "--- Building image for scanning ---"
+                            make build
+                            docker build -t ${IMAGE_NAME}:scan-target .
+
+                            echo "--- Installing Trivy ---"
+                            wget -qO- https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+                                | sh -s -- -b /usr/local/bin
+
+                            echo "--- Scanning image ---"
+                            trivy image \
+                                --severity LOW,MEDIUM,HIGH,CRITICAL \
+                                --format table \
+                                ${IMAGE_NAME}:scan-target
+
+                            trivy image \
+                                --severity LOW,MEDIUM,HIGH,CRITICAL \
+                                --format json \
+                                --output trivy-nightly.json \
+                                ${IMAGE_NAME}:scan-target
+
+                            docker rmi ${IMAGE_NAME}:scan-target || true
+                        '''
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'trivy-nightly.json', allowEmptyArchive: true
+                        }
+                    }
+                }
+
+                stage('govulncheck') {
+                    steps {
+                        sh '''
+                            echo "--- Installing govulncheck ---"
+                            go install golang.org/x/vuln/cmd/govulncheck@latest
+
+                            echo "--- Scanning Go dependencies ---"
+                            ${GOBIN}/govulncheck ./... | tee govulncheck-report.txt
+                        '''
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'govulncheck-report.txt', allowEmptyArchive: true
+                        }
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // Stage 8: Build and Push :nightly Image
+        // =====================================================================
+        stage('Build & Push Nightly') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'docker-registry-creds',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )
+                ]) {
+                    sh '''
+                        echo "--- Building nightly image ---"
+                        docker build \
+                            -t ${IMAGE_NAME}:nightly \
+                            -t ${IMAGE_NAME}:nightly-${NIGHTLY_DATE} \
+                            --label "build.type=nightly" \
+                            --label "build.date=${NIGHTLY_DATE}" \
+                            --label "build.number=${BUILD_NUMBER}" \
+                            .
+
+                        echo "--- Pushing to registry ---"
+                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin ${REGISTRY}
+
+                        docker tag ${IMAGE_NAME}:nightly ${REGISTRY}/${IMAGE_NAME}:nightly
+                        docker tag ${IMAGE_NAME}:nightly-${NIGHTLY_DATE} ${REGISTRY}/${IMAGE_NAME}:nightly-${NIGHTLY_DATE}
+
+                        docker push ${REGISTRY}/${IMAGE_NAME}:nightly
+                        docker push ${REGISTRY}/${IMAGE_NAME}:nightly-${NIGHTLY_DATE}
+
+                        echo "--- Nightly push complete ---"
+                        echo "Pushed: ${REGISTRY}/${IMAGE_NAME}:nightly"
+                        echo "Pushed: ${REGISTRY}/${IMAGE_NAME}:nightly-${NIGHTLY_DATE}"
+                    '''
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Post-build
+    // =========================================================================
+    post {
+        always {
+            junit testResults: 'test-results.xml', allowEmptyResults: true
+
+            sh '''
+                docker rmi ${IMAGE_NAME}:nightly || true
+                docker rmi ${IMAGE_NAME}:nightly-${NIGHTLY_DATE} || true
+                docker system prune -f || true
+            '''
+
+            cleanWs()
+        }
+
+        success {
+            echo "Nightly build #${BUILD_NUMBER} SUCCEEDED (${NIGHTLY_DATE})"
+            // slackSend(color: 'good', message: "NIGHTLY SUCCESS: claude-terminal-service ${NIGHTLY_DATE}\n${BUILD_URL}")
+        }
+
+        failure {
+            echo "Nightly build #${BUILD_NUMBER} FAILED (${NIGHTLY_DATE})"
+            // slackSend(color: 'danger', message: "NIGHTLY FAILURE: claude-terminal-service ${NIGHTLY_DATE}\n${BUILD_URL}")
+        }
+    }
+}
