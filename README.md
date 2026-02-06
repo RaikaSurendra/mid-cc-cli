@@ -104,14 +104,19 @@ mid-llm-cli/
 │   ├── crypto/crypto.go               # AES-256-GCM encryption
 │   ├── logging/logging.go             # Structured logging
 │   └── middleware/ratelimit.go        # Per-IP rate limiting
-├── mid-proxy/                          # MID Server Proxy setup
+├── mid-proxy/                          # MID Server Proxy (alternative to ECC Poller)
 │   ├── docker-compose.yml             # 3-service deployment
 │   ├── docs/                          # Architecture + setup guide
 │   ├── scripts/benchmark.sh           # Side-by-side perf comparison
-│   └── servicenow/                    # Script includes, REST API, widget
-├── servicenow/                         # ServiceNow components (original)
-│   ├── tables/                        # Table definitions
-│   ├── rest-api/                      # Scripted REST API
+│   └── servicenow/
+│       ├── script-includes/           # ClaudeTerminalAPI + ClaudeTerminalProbe
+│       ├── scripted-rest/             # MID Proxy REST endpoints
+│       ├── business-rules/            # AMB output notification
+│       ├── widgets/claude_terminal_mid/ # Terminal widget (MID variant)
+│       └── fix-scripts/               # Table + property + ACL creation scripts
+├── servicenow/                         # ServiceNow components (ECC Poller mode)
+│   ├── tables/                        # Table definitions (JSON)
+│   ├── rest-api/                      # Scripted REST API (XML)
 │   ├── business-rules/                # AMB notifications
 │   └── widgets/                       # Service Portal widgets
 ├── kubernetes/                         # K8s deployment manifests
@@ -120,9 +125,13 @@ mid-llm-cli/
 ├── docs/                               # Low-level design document
 ├── Dockerfile                          # Multi-stage Docker build
 ├── docker-compose.yml                  # 4-service orchestration (Mode 1)
+├── Jenkinsfile                         # CI/CD pipeline (K8s agents)
 ├── Makefile                            # Build automation
 └── .env.example                        # Configuration template
 ```
+
+> **Note:** Jenkins infrastructure (controller, K8s manifests, plugins, docs) lives in a
+> separate shared project at [`jenkins-k8s/`](../jenkins-k8s/) so it can serve all projects.
 
 ## Prerequisites
 
@@ -225,28 +234,26 @@ See `.env.example` for all available options.
 
 ### 3. ServiceNow Setup
 
-#### Import Tables
+#### Option A: Fix Scripts (Recommended)
 
-1. Navigate to **System Definition > Tables**
-2. Import from `servicenow/tables/`:
-   - `x_claude_terminal_session.json`
-   - `x_claude_credentials.json`
+Run the fix scripts in order from **System Definition → Fix Scripts**:
 
-#### Import REST API
+```
+mid-proxy/servicenow/fix-scripts/
+  01_create_terminal_session_table.js   # Tables + columns + indexes
+  02_create_credentials_table.js        # Credentials with password2 encryption
+  03_create_system_properties.js        # MID proxy config properties
+  04_create_acls.js                     # Row-level access controls
+```
 
-1. Navigate to **System Web Services > Scripted REST APIs**
-2. Import: `servicenow/rest-api/claude_terminal_api.xml`
+See `mid-proxy/servicenow/fix-scripts/README.md` for details.
 
-#### Import Business Rules
+#### Option B: Manual Import
 
-1. Navigate to **System Definition > Business Rules**
-2. Import: `servicenow/business-rules/amb_output_notification.xml`
-
-#### Import Widgets
-
-1. Navigate to **Service Portal > Widgets**
-2. Create widget `claude_terminal` from `servicenow/widgets/claude_terminal/`
-3. Create widget `claude_credential_setup` from `servicenow/widgets/claude_credential_setup/`
+1. **Tables:** Import from `servicenow/tables/` (`x_claude_terminal_session.json`, `x_claude_credentials.json`)
+2. **REST API:** Import `servicenow/rest-api/claude_terminal_api.xml`
+3. **Business Rules:** Import `servicenow/business-rules/amb_output_notification.xml`
+4. **Widgets:** Create from `servicenow/widgets/claude_terminal/` and `servicenow/widgets/claude_credential_setup/`
 
 #### For MID Server Proxy mode, additionally follow: `mid-proxy/docs/SETUP_GUIDE.md`
 
@@ -374,6 +381,7 @@ make lint
 | `docs/LOW_LEVEL_DESIGN.md` | Detailed LLD with component design, data flows, DB schema |
 | `mid-proxy/docs/ARCHITECTURE.md` | MID Proxy architecture and comparison |
 | `mid-proxy/docs/SETUP_GUIDE.md` | MID Proxy deployment instructions |
+| `mid-proxy/servicenow/fix-scripts/README.md` | Fix script execution order for table/ACL setup |
 | `DEPLOYMENT.md` | Production deployment guide |
 | `TESTING_GUIDE.md` | Test strategy and execution |
 | `kubernetes/KUBERNETES_DEPLOYMENT.md` | K8s deployment instructions |
